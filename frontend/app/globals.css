@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: #0b0f14;
+  color: #d7dee6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numeric cells align nicely in the settlement-period table. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.scroll-x {
+  overflow-x: auto;
+}
+
+/* thin scrollbars for the dense terminal tables */
+.scroll-x::-webkit-scrollbar { height: 8px; }
+.scroll-x::-webkit-scrollbar-thumb { background: #1e2731; border-radius: 4px; }
