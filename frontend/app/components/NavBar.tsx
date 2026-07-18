@@ -8,9 +8,11 @@ const LINKS: [string, string][] = [
   ["/", "Market"],
   ["/configure", "Battery"],
   ["/replay", "Replay & Live"],
+  ["/validation", "Forecast Validation"],
   ["/terminal", "Terminal"],
   ["/schedule", "Schedule"],
   ["/scenario", "Scenario Lab"],
+  ["/lab", "Reserve & BM Lab"],
   ["/backtest", "Backtest"],
   ["/data", "Data"],
   ["/methodology", "Methodology"],
@@ -18,7 +20,7 @@ const LINKS: [string, string][] = [
 
 export function NavBar() {
   const pathname = usePathname();
-  const { day, setDay, source, setSource } = useAppState();
+  const { day, setDay, source, setSource, learning, setLearning } = useAppState();
   return (
     <header className="sticky top-0 z-20 border-b border-terminal-border bg-terminal-panel/95 backdrop-blur">
       <div className="mx-auto max-w-[1500px] px-4">
@@ -28,7 +30,18 @@ export function NavBar() {
             <span className="text-terminal-muted text-xs hidden sm:inline">Co-Optimisation Terminal</span>
           </div>
           <div className="flex items-center gap-2 text-xs">
-            <label className="text-terminal-muted">Day</label>
+            <button
+              onClick={() => setLearning(!learning)}
+              title="Learning mode adds explanations and examples. It never changes any calculation."
+              className={`rounded border px-2 py-1 ${
+                learning
+                  ? "border-kind-forecast/60 text-kind-forecast bg-kind-forecast/10"
+                  : "border-terminal-border text-terminal-muted hover:text-terminal-text"
+              }`}
+            >
+              📘 Learning: {learning ? "ON" : "OFF"}
+            </button>
+            <label className="text-terminal-muted ml-2">Day</label>
             <input
               type="date"
               value={day}

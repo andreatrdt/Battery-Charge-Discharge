@@ -20,10 +20,12 @@ Design rules enforced here:
 """
 
 from gb_battery.replay.engine import ReplayEngine, ReplayOptions
+from gb_battery.replay.execution import ExecutionParams
 from gb_battery.replay.pit import PITDataStore, PITViolation
 from gb_battery.replay.records import ForecastRecord, ObservationRecord, Provenance
 
 __all__ = [
+    "ExecutionParams",
     "ForecastRecord",
     "ObservationRecord",
     "PITDataStore",

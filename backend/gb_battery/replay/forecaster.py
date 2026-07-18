@@ -75,9 +75,9 @@ class ForecastVintage:
     n_input_forecasts: int
     warnings: list[str] = field(default_factory=list)
 
-    def row_for(self, sp: int) -> VintageRow | None:
+    def row_for(self, day: date, sp: int) -> VintageRow | None:
         for r in self.rows:
-            if r.settlement_period == sp:
+            if r.settlement_date == day and r.settlement_period == sp:
                 return r
         return None
 
@@ -105,15 +105,27 @@ class PITForecaster:
         if not target_periods:
             raise ValueError("target_periods must be non-empty")
         as_of = _utc(as_of)
-        day = target_periods[0].settlement_date
+        # The horizon may cross midnight: gather day-ahead forecasts per target day
+        # and key everything by (settlement_date, settlement_period).
+        day = target_periods[0].settlement_date  # the gate day
+        target_days = sorted({p.settlement_date for p in target_periods})
         warnings: list[str] = []
 
         # --- PIT-visible inputs (single gateway; audited below) -------------
         obs = store.observations_at(as_of, "wholesale_price")
-        da_price = store.forecasts_at(as_of, "wholesale_price", day=day)
-        da_demand = store.forecasts_at(as_of, "demand_mw", day=day)
-        da_wind = store.forecasts_at(as_of, "wind_mw", day=day)
-        da_solar = store.forecasts_at(as_of, "solar_mw", day=day)
+        da_price: dict[tuple, ForecastRecord] = {}
+        da_demand: dict[tuple, ForecastRecord] = {}
+        da_wind: dict[tuple, ForecastRecord] = {}
+        da_solar: dict[tuple, ForecastRecord] = {}
+        for d in target_days:
+            for target, var in [
+                (da_price, "wholesale_price"),
+                (da_demand, "demand_mw"),
+                (da_wind, "wind_mw"),
+                (da_solar, "solar_mw"),
+            ]:
+                for sp, rec in store.forecasts_at(as_of, var, day=d).items():
+                    target[(d, sp)] = rec
         used_records: list[ObservationRecord | ForecastRecord] = [
             *obs, *da_price.values(), *da_demand.values(), *da_wind.values(), *da_solar.values()
         ]
@@ -135,9 +147,9 @@ class PITForecaster:
         global_median = float(np.median([o.value for o in prior_obs])) if prior_obs else 50.0
         global_sigma = float(np.std([o.value for o in prior_obs])) if len(prior_obs) > 2 else 15.0
 
-        def baseline(sp: int) -> tuple[float, str]:
-            if sp in da_price:
-                return da_price[sp].value, "day_ahead_forecast"
+        def baseline(target_day: date, sp: int) -> tuple[float, str]:
+            if (target_day, sp) in da_price:
+                return da_price[(target_day, sp)].value, "day_ahead_forecast"
             if sp in latest_by_sp:
                 return latest_by_sp[sp][1], "lag_same_sp"
             if sp in by_sp:
@@ -158,7 +170,7 @@ class PITForecaster:
             num = den = 0.0
             w = 1.0
             for o in reversed(today_sorted):
-                b, _ = baseline(o.settlement_period)
+                b, _ = baseline(o.settlement_date, o.settlement_period)
                 num += w * (o.value - b)
                 den += w
                 w *= lam
@@ -167,14 +179,15 @@ class PITForecaster:
         # --- Assemble rows ----------------------------------------------------
         rows: list[VintageRow] = []
         for k, per in enumerate(target_periods):
-            b, basis = baseline(per.settlement_period)
+            b, basis = baseline(per.settlement_date, per.settlement_period)
             decayed_bias = bias * (self.bias_decay_ahead ** k)
             point = b + decayed_bias
             widen = min(1.0 + SIGMA_WIDEN_PER_SP * k, 2.0)
             sigma = sigma_for(per.settlement_period) * widen
-            dem = da_demand.get(per.settlement_period)
-            wnd = da_wind.get(per.settlement_period)
-            sol = da_solar.get(per.settlement_period)
+            key = (per.settlement_date, per.settlement_period)
+            dem = da_demand.get(key)
+            wnd = da_wind.get(key)
+            sol = da_solar.get(key)
             fund_prov = dem.provenance if dem else (wnd.provenance if wnd else None)
             rows.append(
                 VintageRow(

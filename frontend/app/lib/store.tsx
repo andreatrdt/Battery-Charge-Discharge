@@ -33,6 +33,9 @@ export interface AppState {
   setSource: (s: string) => void;
   offline: boolean;
   setOffline: (o: boolean) => void;
+  /** Learning mode changes explanation density only — never calculations. */
+  learning: boolean;
+  setLearning: (l: boolean) => void;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -42,6 +45,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [day, setDay] = useState("2025-01-15");
   const [source, setSource] = useState("synthetic");
   const [offline, setOffline] = useState(false);
+  const [learning, setLearning] = useState(true);
 
   useEffect(() => {
     try {
@@ -52,6 +56,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (s.day) setDay(s.day);
         if (s.source) setSource(s.source);
         if (typeof s.offline === "boolean") setOffline(s.offline);
+        if (typeof s.learning === "boolean") setLearning(s.learning);
       }
     } catch {
       /* ignore */
@@ -59,11 +64,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("gbb_state", JSON.stringify({ config, day, source, offline }));
-  }, [config, day, source, offline]);
+    localStorage.setItem(
+      "gbb_state",
+      JSON.stringify({ config, day, source, offline, learning }),
+    );
+  }, [config, day, source, offline, learning]);
 
   return (
-    <Ctx.Provider value={{ config, setConfig, day, setDay, source, setSource, offline, setOffline }}>
+    <Ctx.Provider
+      value={{
+        config, setConfig, day, setDay, source, setSource,
+        offline, setOffline, learning, setLearning,
+      }}
+    >
       {children}
     </Ctx.Provider>
   );

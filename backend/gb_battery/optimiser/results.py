@@ -5,10 +5,17 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 
 class ActionLabel(StrEnum):
+    """Legacy single-label action (kept for compatibility).
+
+    Prefer the independent ``energy_action`` and ``flexibility_position``
+    fields: an idle battery holding both upward and downward capability is not
+    "RESERVE UP" — it is Idle energy + Both flexibility.
+    """
+
     CHARGE = "CHARGE"
     DISCHARGE = "DISCHARGE"
     IDLE = "IDLE"
@@ -75,6 +82,29 @@ class PeriodResult(BaseModel):
     binding_constraints: list[str] = []
     marginals: MarginalValues = MarginalValues()
     explanation: str = ""
+
+    # Energy action and flexibility are INDEPENDENT concepts (Phase 6).
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def energy_action(self) -> str:
+        if self.charge_mw > 1e-4:
+            return "CHARGE"
+        if self.discharge_mw > 1e-4:
+            return "DISCHARGE"
+        return "IDLE"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def flexibility_position(self) -> str:
+        up = self.upward_reserved_mw > 1e-4
+        down = self.downward_reserved_mw > 1e-4
+        if up and down:
+            return "BOTH"
+        if up:
+            return "UP"
+        if down:
+            return "DOWN"
+        return "NONE"
 
 
 class OptimisationResult(BaseModel):
