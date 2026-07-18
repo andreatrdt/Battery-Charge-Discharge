@@ -1,8 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { gbp, num, type PeriodResult } from "../lib/api";
 import { useOptimise } from "../lib/hooks";
+import { useAppState } from "../lib/store";
 import { SettlementTable } from "../components/SettlementTable";
 import { ActionBadge, Disclaimer, ErrorNote, Panel, Spinner, Stat } from "../components/ui";
 
@@ -10,9 +12,14 @@ export default function TerminalPage() {
   const [mode, setMode] = useState("deterministic");
   const [riskAversion, setRiskAversion] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
+  const { day, source } = useAppState();
 
   const extra = mode === "stochastic" ? { risk_aversion: riskAversion, n_scenarios: 25 } : {};
   const { result, warnings, loading, error, run } = useOptimise(mode, extra);
+
+  // With the Elexon source on a completed day, the day's realised MID prices are
+  // fed straight into the optimiser: that is hindsight, not a tradable strategy.
+  const isHindsight = source === "elexon" && day < new Date().toISOString().slice(0, 10);
 
   const selectedPeriod = useMemo<PeriodResult | null>(
     () => result?.periods.find((p) => p.settlement_period === selected) || null,
@@ -46,11 +53,32 @@ export default function TerminalPage() {
         </div>
       </div>
 
+      {isHindsight ? (
+        <div className="rounded border border-kind-estimated/50 bg-kind-estimated/15 px-3 py-2 text-xs text-kind-estimated">
+          <strong>Perfect-foresight view — not a tradable strategy.</strong> The Elexon source on a
+          completed day feeds the day&apos;s <em>realised</em> MID prices into a single whole-day
+          optimisation. Use{" "}
+          <Link href="/replay" className="underline">
+            Replay &amp; Live
+          </Link>{" "}
+          for the honest rolling simulation where each decision sees only information published
+          before it.
+        </div>
+      ) : (
+        <Disclaimer>
+          <strong>Single-shot planning view.</strong> One whole-day optimisation on the currently
+          selected inputs (see badges for provenance). For decision-by-decision simulation with
+          point-in-time information, use the Replay &amp; Live page.
+        </Disclaimer>
+      )}
+
       <Disclaimer>
         <strong>Sign convention.</strong> P&amp;L is positive = revenue. Charging at a{" "}
         <em>negative</em> price is revenue (paid to consume). MW columns show power at the grid
-        connection; SoC is stored energy (MWh). Prices are forecast/estimated unless the source is
-        live Elexon.
+        connection; SoC is stored energy (MWh). Service &amp; BM revenue lines are{" "}
+        <strong>experimental / assumption-based</strong> (default availability prices and BM margins
+        are assumptions, not observed market awards) and are excluded from the credible rolling
+        strategy on the Replay page.
       </Disclaimer>
 
       {error && <ErrorNote error={error} />}
@@ -61,8 +89,8 @@ export default function TerminalPage() {
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
             <Stat label="Total expected P&L" value={gbp(result.total_expected_pnl_gbp)} accent="#22c55e" />
             <Stat label="Wholesale" value={gbp(result.total_wholesale_pnl_gbp)} />
-            <Stat label="Service (avail)" value={gbp(result.total_service_pnl_gbp)} />
-            <Stat label="BM activation" value={gbp(result.total_bm_activation_pnl_gbp)} />
+            <Stat label="Service (avail)" value={gbp(result.total_service_pnl_gbp)} sub="experimental / assumed" />
+            <Stat label="BM activation" value={gbp(result.total_bm_activation_pnl_gbp)} sub="experimental / assumed" />
             <Stat label="Degradation" value={`−${gbp(result.total_degradation_cost_gbp)}`} accent="#ef4444" />
             <Stat label="Full cycles" value={num(result.full_cycle_equivalents, 2)} sub={`solver: ${result.solver}`} />
           </div>

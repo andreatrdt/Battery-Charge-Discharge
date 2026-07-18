@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from gb_battery import __version__
-from gb_battery.api.routers import analysis, data, market, optimise
+from gb_battery.api.routers import analysis, data, market, optimise, replay
 
 app = FastAPI(
     title="GB Battery Co-Optimisation Terminal",
@@ -34,6 +34,7 @@ app.include_router(market.router)
 app.include_router(optimise.router)
 app.include_router(analysis.router)
 app.include_router(data.router)
+app.include_router(replay.router)
 
 
 @app.get("/api/health", tags=["health"])

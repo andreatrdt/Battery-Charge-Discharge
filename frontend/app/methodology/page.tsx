@@ -47,6 +47,43 @@ export default function MethodologyPage() {
         </p>
       </Panel>
 
+      <Panel title="Replay & Live Trading (point-in-time simulation)">
+        <p className="text-sm text-terminal-muted">
+          The Replay page answers: <em>at every decision timestamp, what information was available,
+          what did the model forecast, what action did it choose, and how did it perform once the
+          outcome became known?</em> Three modes are kept strictly separate:
+        </p>
+        <ul className="mt-2 text-sm text-terminal-muted list-disc pl-5 space-y-1">
+          <li>
+            <strong>Historical Replay</strong> — a completed day is simulated chronologically. At
+            each Settlement Period&apos;s gate the engine builds an information set containing only
+            records with <code className="text-kind-observed">published_at ≤ as_of</code>, forecasts
+            the rest of the day, optimises the remaining horizon, executes <em>only the first
+            period</em>, then settles it against the outturn once published. SoC, cycle budget and
+            cumulative P&amp;L persist across steps. MID availability is reconstructed as period end
+            + 10 min (documented assumption — the API exposes no per-record publish time).
+          </li>
+          <li>
+            <strong>Live Paper Trading</strong> — the same loop for today: completed periods are
+            settled with published outturns; the future carries forecasts only (future actuals are
+            null by construction). Realised paper P&amp;L and expected future P&amp;L are reported
+            separately. No orders are submitted anywhere.
+          </li>
+          <li>
+            <strong>Perfect Foresight</strong> — a single optimisation on the realised price path,
+            labelled &ldquo;not a tradable strategy&rdquo; and used only as an upper bound.
+          </li>
+        </ul>
+        <p className="mt-2 text-sm text-terminal-muted">
+          The credible rolling strategy is <strong>wholesale-only</strong>: reserve and BM revenue
+          lines elsewhere in the app are experimental / assumption-based and never mixed into replay
+          results. Executed energy is assumed to clear at the MID reference price — no bid/ask
+          spread, liquidity, partial fills or market impact are modelled. Every decision carries a
+          machine-checkable audit (newest input publication vs decision gate) exposed in{" "}
+          <code className="text-kind-observed">/api/replay/&#123;id&#125;/metrics</code>.
+        </p>
+      </Panel>
+
       <Panel title="Forecasting">
         <p className="text-sm text-terminal-muted">
           Three levels: user-supplied; transparent baselines (previous day/week same SP, rolling

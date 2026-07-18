@@ -7,6 +7,7 @@ import { useAppState } from "../lib/store";
 const LINKS: [string, string][] = [
   ["/", "Market"],
   ["/configure", "Battery"],
+  ["/replay", "Replay & Live"],
   ["/terminal", "Terminal"],
   ["/schedule", "Schedule"],
   ["/scenario", "Scenario Lab"],

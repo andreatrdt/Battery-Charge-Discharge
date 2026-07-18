@@ -37,9 +37,10 @@
 | Forecasting | `gb_battery.forecast` | Leakage-safe features, baselines, GBM quantile models, chronological CV |
 | Optimisation | `gb_battery.optimiser` | Pyomo model, HiGHS solver wrapper, result extraction, marginal values, explanations |
 | Scenarios | `gb_battery.scenario` | Scenario generation, Scenario Lab transforms, stochastic + CVaR + robust |
-| Backtesting | `gb_battery.backtest` | Rolling engine, benchmark strategies, metrics, leakage audit |
+| Backtesting | `gb_battery.backtest` | Daily engine, benchmark strategies, metrics, leakage audit |
+| Replay | `gb_battery.replay` | Point-in-time store (`published_at ≤ as_of` gateway), PIT forecaster with vintages, rolling execute-one-period engine, labelled perfect-foresight benchmark, in-memory sessions — see [replay_methodology.md](replay_methodology.md) |
 | BM research | `gb_battery.bm` | Exploratory BOD↔BOALF acceptance modelling |
-| API | `gb_battery.api` | FastAPI routers (market, optimise, analysis, data) |
+| API | `gb_battery.api` | FastAPI routers (market, optimise, analysis, data, replay, live) |
 | Frontend | `frontend/` | Next.js pages, typed API client, shared state, charts, tables |
 
 ## Key design decisions
