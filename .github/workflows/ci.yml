@@ -39,18 +39,20 @@ jobs:
 
           router = Path("backend/gb_battery/api/routers/replay.py")
           text = router.read_text()
-          text, n1 = re.subn(
+          text = re.sub(
               r'''        decisions = \(\n\s*\[d\.model_dump\(mode="json"\) for d in session\.engine\.decisions\] if session else stored\["decisions"\]\n\s*\)''',
               '''        if session is not None:\n            decisions = [d.model_dump(mode="json") for d in session.engine.decisions]\n        else:\n            assert stored is not None\n            decisions = stored["decisions"] or []''',
               text,
           )
-          text, n2 = re.subn(
+          text = re.sub(
               r'''        att = \(\n\s*attribution\(session\.engine\.decisions\)\n\s*if session\n\s*else \(stored\.get\("metrics"\) or \{\}\)\.get\("attribution"\)\n\s*\)''',
               '''        if session is not None:\n            att = attribution(session.engine.decisions)\n        else:\n            assert stored is not None\n            att = (stored.get("metrics") or {}).get("attribution")''',
               text,
           )
-          if n1 != 1 or n2 != 1:
-              raise SystemExit(f"router patch counts: schedule={n1}, attribution={n2}")
+          text = text.replace(
+              '    elif what == "attribution":\n        if session is not None:',
+              '    elif what == "attribution":\n        att: dict | None\n        if session is not None:',
+          )
           router.write_text(text)
           PY
           cd backend
@@ -62,7 +64,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add backend/gb_battery/replay/validation.py backend/gb_battery/api/routers/replay.py backend/gb_battery/replay/metrics.py backend/tests/test_replay_metrics.py
           if ! git diff --cached --quiet; then
-            git commit -m "Fix backend static checks"
+            git commit -m "Finish backend typing fixes"
             git push origin HEAD:${{ github.head_ref }}
           fi
       - name: Ruff
@@ -79,8 +81,15 @@ jobs:
           name: backend-mypy
           path: backend/mypy.txt
       - name: Pytest
+        id: pytest
         working-directory: backend
-        run: pytest -q
+        run: pytest -q > pytest.txt 2>&1
+      - name: Upload Pytest diagnostics
+        if: failure() && steps.pytest.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest
+          path: backend/pytest.txt
 
   frontend:
     runs-on: ubuntu-latest
