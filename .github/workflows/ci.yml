@@ -30,8 +30,15 @@ jobs:
             backend/tests/test_replay_metrics.py
             backend/ruff.txt
       - name: Mypy
+        id: mypy
         working-directory: backend
-        run: mypy gb_battery
+        run: mypy gb_battery > mypy.txt 2>&1
+      - name: Upload Mypy diagnostics
+        if: failure() && steps.mypy.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-mypy
+          path: backend/mypy.txt
       - name: Pytest
         working-directory: backend
         run: pytest -q
