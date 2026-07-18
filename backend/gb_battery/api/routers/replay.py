@@ -544,6 +544,7 @@ def replay_export(replay_id: str, what: str = Query(...)) -> PlainTextResponse:
                             p["charge_mw"], p["discharge_mw"], p["ending_soc_mwh"],
                             p["forecast_price"], p["expected_pnl_gbp"]])
     elif what == "attribution":
+        att: dict | None
         if session is not None:
             att = attribution(session.engine.decisions)
         else:
