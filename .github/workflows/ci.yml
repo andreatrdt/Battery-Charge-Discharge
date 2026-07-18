@@ -25,6 +25,7 @@ jobs:
         if: github.actor != 'github-actions[bot]'
         run: |
           python - <<'PY'
+          import re
           from pathlib import Path
 
           validation = Path("backend/gb_battery/replay/validation.py")
@@ -38,30 +39,19 @@ jobs:
 
           router = Path("backend/gb_battery/api/routers/replay.py")
           text = router.read_text()
-          old_schedule = '''        decisions = (
-              [d.model_dump(mode="json") for d in session.engine.decisions] if session else stored["decisions"]
-          )'''
-          new_schedule = '''        if session is not None:
-              decisions = [d.model_dump(mode="json") for d in session.engine.decisions]
-          else:
-              assert stored is not None
-              decisions = stored["decisions"] or []'''
-          if old_schedule not in text:
-              raise SystemExit("proposed-schedule block not found")
-          text = text.replace(old_schedule, new_schedule)
-          old_attr = '''        att = (
-              attribution(session.engine.decisions)
-              if session
-              else (stored.get("metrics") or {}).get("attribution")
-          )'''
-          new_attr = '''        if session is not None:
-              att = attribution(session.engine.decisions)
-          else:
-              assert stored is not None
-              att = (stored.get("metrics") or {}).get("attribution")'''
-          if old_attr not in text:
-              raise SystemExit("attribution block not found")
-          router.write_text(text.replace(old_attr, new_attr))
+          text, n1 = re.subn(
+              r'''        decisions = \(\n\s*\[d\.model_dump\(mode="json"\) for d in session\.engine\.decisions\] if session else stored\["decisions"\]\n\s*\)''',
+              '''        if session is not None:\n            decisions = [d.model_dump(mode="json") for d in session.engine.decisions]\n        else:\n            assert stored is not None\n            decisions = stored["decisions"] or []''',
+              text,
+          )
+          text, n2 = re.subn(
+              r'''        att = \(\n\s*attribution\(session\.engine\.decisions\)\n\s*if session\n\s*else \(stored\.get\("metrics"\) or \{\}\)\.get\("attribution"\)\n\s*\)''',
+              '''        if session is not None:\n            att = attribution(session.engine.decisions)\n        else:\n            assert stored is not None\n            att = (stored.get("metrics") or {}).get("attribution")''',
+              text,
+          )
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f"router patch counts: schedule={n1}, attribution={n2}")
+          router.write_text(text)
           PY
           cd backend
           ruff check --fix gb_battery tests
