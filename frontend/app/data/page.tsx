@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, replayApi, type ReplayInputsPayload } from "../lib/api";
+import { api, replayApi, type ReplayInputsPayload, type ReplaySummary } from "../lib/api";
 import { ErrorNote, Panel, Spinner } from "../components/ui";
 
 interface LastReplay {
@@ -12,17 +12,27 @@ interface LastReplay {
   step_index: number;
 }
 
+type ArchivedRun = {
+  replay_id: string;
+  day: string;
+  mode: string;
+  complete: boolean;
+  saved_at: string | null;
+  summary: ReplaySummary | null;
+};
+
 export default function DataExplorer() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-lg font-semibold">Data</h1>
+        <h1 className="text-lg font-semibold">Data &amp; Audit</h1>
         <p className="text-xs text-terminal-muted">
-          Two strictly separated sections: the inputs actually used by your current replay/live run,
-          and the bundled synthetic demonstration dataset.
+          Exact point-in-time inputs for the current decision, persistent replay archives, and the
+          bundled synthetic demonstration dataset are kept strictly separate.
         </p>
       </div>
       <CurrentRunInputs />
+      <ArchivedRuns />
       <BundledSample />
     </div>
   );
@@ -99,7 +109,7 @@ function CurrentRunInputs() {
       </div>
 
       {error && (
-        <ErrorNote error={`${error} — the session may have expired (sessions are in-memory); start a new replay.`} />
+        <ErrorNote error={`${error} — the run may not have produced a decision yet, or the archive may not contain point-in-time input rows for this step.`} />
       )}
 
       {inputs && (
@@ -148,6 +158,77 @@ function CurrentRunInputs() {
             </div>
           </div>
         </>
+      )}
+    </Panel>
+  );
+}
+
+/* -------------------------------------------------------- persistent archive */
+
+function ArchivedRuns() {
+  const [runs, setRuns] = useState<ArchivedRun[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    replayApi
+      .archivedRuns()
+      .then((r) => setRuns(r.runs))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <Panel title="Persistent replay archive (DuckDB)">
+      <p className="mb-2 text-xs text-terminal-muted">
+        Completed replay sessions are archived by the backend and survive restarts. Archived runs are
+        read-only and include options, versions, decisions, forecast vintages, summaries and metrics
+        when available.
+      </p>
+      {loading && <Spinner label="Loading archived runs…" />}
+      {error && <ErrorNote error={error} />}
+      {!loading && !error && runs.length === 0 && (
+        <p className="text-xs text-terminal-muted">No completed replay has been archived yet.</p>
+      )}
+      {runs.length > 0 && (
+        <div className="scroll-x rounded border border-terminal-border/60">
+          <table className="w-full text-[11px] tabular">
+            <thead className="bg-terminal-panel">
+              <tr className="text-left text-terminal-muted">
+                {[
+                  "Replay ID",
+                  "Day",
+                  "Mode",
+                  "Complete",
+                  "Saved",
+                  "Realised P&L",
+                  "Cycles",
+                  "Ending SoC",
+                ].map((h) => (
+                  <th key={h} className="whitespace-nowrap border-b border-terminal-border px-2 py-1.5">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr key={r.replay_id} className="border-b border-terminal-border/30">
+                  <td className="max-w-52 truncate px-2 py-1" title={r.replay_id}>{r.replay_id}</td>
+                  <td className="px-2 py-1">{r.day}</td>
+                  <td className="px-2 py-1">{r.mode}</td>
+                  <td className="px-2 py-1">{r.complete ? "yes" : "no"}</td>
+                  <td className="px-2 py-1">{r.saved_at ? r.saved_at.replace("T", " ").slice(0, 16) : "—"}</td>
+                  <td className="px-2 py-1 text-action-charge">
+                    {r.summary ? `£${r.summary.realised_pnl_gbp.toLocaleString("en-GB", { maximumFractionDigits: 0 })}` : "—"}
+                  </td>
+                  <td className="px-2 py-1">{r.summary ? r.summary.cycles.toFixed(2) : "—"}</td>
+                  <td className="px-2 py-1">{r.summary ? `${r.summary.ending_soc_mwh.toFixed(1)} MWh` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </Panel>
   );
@@ -241,8 +322,7 @@ function BundledSample() {
       <p className="mb-2 text-xs text-kind-synthetic">
         Generated demo data (35 seeded days, provenance <strong>synthetic</strong>) so the app runs
         fully offline. It is <strong>not</strong> observed market data and is <strong>not</strong>{" "}
-        necessarily what your current run used — see &ldquo;Current run inputs&rdquo; above for
-        that.
+        necessarily what your current run used — see “Current run inputs” above for that.
       </p>
       {error && <ErrorNote error={error} />}
       {loading && <Spinner label="Loading sample…" />}
