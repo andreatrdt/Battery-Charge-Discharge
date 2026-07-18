@@ -138,7 +138,7 @@ export function MarketTimeline({ highlight }: { highlight?: string }) {
       {learning && !stage && (
         <p className="mt-1 text-[10px] text-terminal-muted">
           Click a stage to see what happens there. The highlighted stage is the one the current
-          page's numbers belong to.
+          page&apos;s numbers belong to.
         </p>
       )}
     </div>
