@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -214,7 +215,7 @@ def _summarise(config: BatteryConfig, ledger: pd.DataFrame) -> dict:
     }
 
 
-def _num(x: object) -> float | None:
+def _num(x: Any) -> float | None:
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     try:

@@ -18,13 +18,38 @@ half-hourly **Settlement Period**.
 
 - GB power-market structure (wholesale, Balancing Mechanism, imbalance settlement)
 - Battery **state-of-charge optimisation** with physical & economic constraints
-- **Wholesale + balancing-service + imbalance co-optimisation** (no double-counting)
+- A **point-in-time replay engine**: for any decision at time *t*, it can be proven
+  that every input was published at or before *t* (machine-checked leakage audit)
+- **Rolling-horizon operation**: forecast → optimise → execute one Settlement Period →
+  settle against the published outturn → carry SoC forward
+- **Historical Replay, Live Paper Trading and a Perfect-Foresight benchmark** as three
+  strictly separated modes (hindsight is labelled, never mixed into strategy results)
 - Real public-API ingestion with **data lineage** (source / retrieval / publication / event timestamps)
-- **Rigorous, chronological** time-series forecasting (no leakage)
+- **Rigorous, chronological** time-series forecasting (no leakage, quantile bands, vintages)
 - **Constrained optimisation** in Pyomo solved with the open-source HiGHS solver
 - **Scenario & stochastic** optimisation with a CVaR risk penalty
-- **Rolling-horizon (MPC-style)** operation and a **leakage-audited backtest**
 - A **trader-focused** web interface that explains *why* each action was chosen
+
+### Replay & Live Trading (the centrepiece)
+
+The **Replay & Live** page answers: *at every historical or live decision timestamp,
+what information was available, what did the model forecast, what action did it
+choose, and how did that decision perform once the actual outcome became known?*
+
+- **Historical Replay** steps through a completed day chronologically; each decision
+  gate sees only records with `published_at ≤ as_of` (MID availability is
+  reconstructed as period end + 10 min and flagged as such).
+- **Live Paper Trading** applies the same loop to today: settled paper P&L for
+  completed periods, forecast-only for the future — future actuals are null by
+  construction. No orders are submitted anywhere.
+- **Perfect Foresight** optimises on the realised path and is labelled
+  *"not a tradable strategy"* — it exists only as an upper bound.
+
+The credible headline P&L is **wholesale-only** (realised wholesale P&L −
+degradation); reserve/BM revenue elsewhere in the app is labelled
+*experimental / assumption-based*. Execution is assumed at the MID reference price —
+no spread, liquidity, partial fills or market impact are modelled. See
+[docs/replay_methodology.md](docs/replay_methodology.md).
 
 ## Architecture
 
@@ -38,6 +63,11 @@ half-hourly **Settlement Period**.
    (Next.js, TS,          (REST API)          deterministic / stochastic    scenarios
     Recharts,                                 / CVaR + rolling horizon
     TanStack Table)                                    ▲
+                                                       ├── Replay engine (PIT store:
+                                                       │   published_at ≤ as_of,
+                                                       │   forecast vintages, rolling
+                                                       │   execute-one-period loop,
+                                                       │   leakage audit, live paper)
                                                        └── Backtester (benchmarks,
                                                            perfect-foresight bound,
                                                            leakage audit)
@@ -56,12 +86,14 @@ backend/            Python 3.12 package `gb_battery` + tests
     data/               Elexon + NESO adapters, providers, lineage, cache, market snapshot
     forecast/           Leakage-safe features, baselines, quantile models, chronological CV
     scenario/           Scenario generation, Scenario Lab, stochastic + CVaR optimiser
-    backtest/           Rolling backtest engine, benchmarks, leakage audit, metrics
+    backtest/           Daily backtest engine, benchmarks, leakage audit, metrics
+    replay/             Point-in-time store, PIT forecaster, rolling replay engine,
+                        benchmarks (perfect foresight labelled), session registry
     bm/                 BM acceptance research module (exploratory)
-    api/                FastAPI app (routers: market, optimise, analysis, data)
+    api/                FastAPI app (routers: market, optimise, analysis, data, replay)
     demo/               Synthetic scenarios + frozen public-data sample
     data_samples/       Frozen synthetic Parquet (offline demo)
-  tests/                pytest suite (68 tests)
+  tests/                pytest suite (98 tests)
 frontend/           Next.js + TypeScript + Tailwind + Recharts + TanStack Table
 docs/               Architecture, data sources, methodology, model, backtesting, limitations
 ```
@@ -81,7 +113,7 @@ docker compose up --build
 # 1. Backend
 make install            # creates .venv and installs backend[dev]
 make ingest-demo        # builds the offline demo snapshot (no network needed)
-make test               # run the 68-test suite
+make test               # run the 98-test suite
 make run                # FastAPI on http://localhost:8000  (add GBB_OFFLINE=1 for offline)
 
 # 2. Frontend (separate terminal)
@@ -135,24 +167,29 @@ exposure — avoiding double-counting the same energy/capacity. See
 
 ## Example result
 
-A demo day (50 MW / 100 MWh, 2 GBP/MWh degradation) charges overnight, discharges into the
-evening peak, and reserves capability on the ramps. A 35-day chronological backtest:
+A single-day **rolling point-in-time replay** (50 MW / 100 MWh demo battery, bundled
+synthetic sample, 2025-01-15): at each of the 48 gates the model forecast the rest of
+the day from information published before the gate, optimised, and committed one
+period. All 48 decisions passed the leakage audit.
 
-| Strategy | P&L | Capture of perfect foresight |
-|----------|-----|------------------------------|
+| Strategy (same information sets) | Realised P&L | Capture of perfect foresight |
+|----------------------------------|--------------|------------------------------|
 | No-operation | £0 | 0% |
-| Charge-low / discharge-high | ~£213k | ~57% |
-| Fixed percentile | ~£195k | ~52% |
-| **Deterministic optimiser** | **~£308k** | **~82%** |
-| Perfect foresight (upper bound) | £374k | 100% |
+| Rolling threshold rule | ~£6.9k | ~62% |
+| **Rolling forecast optimiser** | **~£10.2k** | **~91%** |
+| Perfect foresight (labelled upper bound) | ~£11.2k | 100% |
 
+1-step-ahead forecast MAE ≈ £7.4/MWh, bias ≈ −£0.3/MWh.
 *(Synthetic sample; illustrative only — not achievable live.)*
 
 ## Testing
 
 ```bash
 make test        # pytest: settlement/DST, constraints, the 6 deterministic cases,
-                 # economics, forecasting, backtest ordering, scenario/stochastic, API
+                 # economics, forecasting, backtest ordering, scenario/stochastic, API,
+                 # and the replay suite (PIT filtering, leakage rejection, SoC carry,
+                 # first-action-only execution, 46/48/50-SP days, reproducibility,
+                 # live-mode null future actuals, a hand-verifiable 3-period case)
 make lint        # ruff
 make typecheck   # mypy (backend)
 cd frontend && npm run build   # Next.js production build + type-check
@@ -164,6 +201,8 @@ capacity preservation, service value preservation, degradation-aware cycling, te
 ## Data limitations
 
 - Market Index Data is a **short-term wholesale reference**, not a full live EPEX order book.
+- MID has no per-record publish time; replay availability is **reconstructed** as
+  period end + 10 minutes and flagged `publication_reconstructed` in every record.
 - Reserve constraints are **conservative simplifications** of real DC/DM/DR & Balancing Reserve rules.
 - BM acceptance modelling is **exploratory**; the production optimiser uses user/historical
   service-value assumptions and labels every estimate.

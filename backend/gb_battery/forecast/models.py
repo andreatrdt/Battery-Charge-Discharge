@@ -9,6 +9,7 @@ shuffle data themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -75,8 +76,8 @@ class GradientBoostingQuantileForecaster:
     def __init__(self, quantiles: tuple[float, ...] = DEFAULT_QUANTILES, random_state: int = 0) -> None:
         self.quantiles = quantiles
         self.random_state = random_state
-        self._point = None
-        self._q_models: dict[float, object] = {}
+        self._point: Any = None
+        self._q_models: dict[float, Any] = {}
 
     def fit(self, history: pd.DataFrame) -> GradientBoostingQuantileForecaster:
         from sklearn.ensemble import HistGradientBoostingRegressor
@@ -117,7 +118,7 @@ class GradientBoostingQuantileForecaster:
 class FittedForecast:
     """Convenience bundle of a fitted forecaster and the feature frame it predicts on."""
 
-    forecaster: object
+    forecaster: Any
     features: pd.DataFrame = field(repr=False)
 
     def forecast(self) -> PriceForecast:

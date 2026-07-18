@@ -162,6 +162,262 @@ export const api = {
     ),
 };
 
+// ---------------------------------------------------------------- Replay & Live
+
+export type Provenance =
+  | "observed"
+  | "published_forecast"
+  | "model_forecast"
+  | "reconstructed"
+  | "synthetic"
+  | "assumed"
+  | "perfect_foresight";
+
+export interface ProposedPeriod {
+  settlement_period: number;
+  start_utc: string;
+  action: string;
+  charge_mw: number;
+  discharge_mw: number;
+  ending_soc_mwh: number;
+  forecast_price: number;
+  expected_pnl_gbp: number;
+}
+
+export interface DecisionRecord {
+  step: number;
+  settlement_date: string;
+  settlement_period: number;
+  start_utc: string;
+  end_utc: string;
+  duration_hours: number;
+  as_of: string;
+  information_cutoff: string;
+  basis_max_published_at: string | null;
+  n_input_observations: number;
+  n_input_forecasts: number;
+  forecast_price: number;
+  forecast_q10: number;
+  forecast_q90: number;
+  forecast_sigma: number;
+  forecast_basis: string;
+  forecast_provenance: Provenance;
+  action: string;
+  charge_mw: number;
+  discharge_mw: number;
+  soc_before_mwh: number;
+  soc_after_mwh: number;
+  expected_immediate_pnl_gbp: number;
+  expected_horizon_pnl_gbp: number;
+  explanation: string;
+  binding_constraints: string[];
+  proposed_schedule: ProposedPeriod[];
+  settlement_status: "settled" | "pending";
+  actual_price: number | null;
+  actual_price_available_at: string | null;
+  actual_price_provenance: Provenance | null;
+  realised_pnl_gbp: number | null;
+  degradation_cost_gbp: number;
+  forecast_error: number | null;
+  warnings: string[];
+}
+
+export interface ReplaySummary {
+  n_steps: number;
+  n_settled: number;
+  n_pending: number;
+  realised_pnl_gbp: number;
+  wholesale_revenue_gbp: number;
+  charging_cost_gbp: number;
+  degradation_cost_gbp: number;
+  cycles: number;
+  max_drawdown_gbp: number;
+  ending_soc_mwh: number;
+  forecast_mae: number | null;
+  forecast_rmse: number | null;
+  forecast_bias: number | null;
+  execution_assumption: string;
+}
+
+export interface ReplayStatus {
+  replay_id: string;
+  mode: string;
+  day: string;
+  options: Record<string, unknown>;
+  n_periods: number;
+  step_index: number;
+  complete: boolean;
+  soc_mwh: number;
+  next_settlement_period: number | null;
+  next_period_start_utc: string | null;
+  summary: ReplaySummary;
+  warnings: string[];
+  execution_assumption: string;
+  decisions?: DecisionRecord[];
+  new_decisions?: DecisionRecord[];
+}
+
+export interface VintageRow {
+  settlement_date: string;
+  settlement_period: number;
+  start_utc: string;
+  point: number;
+  q10: number;
+  q50: number;
+  q90: number;
+  sigma: number;
+  basis: string;
+  intraday_bias: number;
+  provenance: Provenance;
+  demand_forecast_mw: number | null;
+  wind_forecast_mw: number | null;
+  solar_forecast_mw: number | null;
+}
+
+export interface ForecastVintagePayload {
+  step: number;
+  n_vintages: number;
+  issued_at: string;
+  information_cutoff: string;
+  basis_max_published_at: string | null;
+  n_input_observations: number;
+  n_input_forecasts: number;
+  rows: VintageRow[];
+  warnings: string[];
+}
+
+export interface StrategyRow {
+  strategy: string;
+  label?: string;
+  realised_pnl_gbp: number;
+  wholesale_revenue_gbp?: number;
+  charging_cost_gbp?: number;
+  degradation_cost_gbp?: number;
+  cycles?: number;
+  max_drawdown_gbp?: number;
+  forecast_mae?: number | null;
+  forecast_rmse?: number | null;
+  forecast_bias?: number | null;
+  capture_of_perfect_pct?: number;
+}
+
+export interface PfSchedulePeriod {
+  settlement_period: number;
+  action: string;
+  charge_mw: number;
+  discharge_mw: number;
+  ending_soc_mwh: number;
+  price: number;
+}
+
+export interface ReplayMetrics {
+  table: StrategyRow[];
+  perfect_foresight_pnl_gbp: number | null;
+  perfect_foresight_label: string;
+  perfect_foresight_schedule: PfSchedulePeriod[] | null;
+  peak_trough: Record<string, number | boolean | null>;
+  note: string;
+  leakage_audit: {
+    step: number;
+    settlement_period: number;
+    as_of: string;
+    basis_max_published_at: string | null;
+    inputs_predate_decision: boolean;
+    outturn_published_after_decision: boolean;
+  }[];
+  leakage_ok: boolean;
+}
+
+export interface LiveResult extends ReplayStatus {
+  now_utc: string;
+  decisions: DecisionRecord[];
+  forward_proposal: ProposedPeriod[] | null;
+  forward_vintage: {
+    issued_at: string;
+    information_cutoff: string;
+    rows: {
+      settlement_period: number;
+      start_utc: string;
+      point: number;
+      q10: number;
+      q90: number;
+      basis: string;
+      provenance: Provenance;
+    }[];
+  } | null;
+  disclaimer: string;
+}
+
+export interface ReplayInputsPayload {
+  step: number;
+  as_of: string;
+  settlement_period: number;
+  observations_visible: {
+    variable: string;
+    settlement_date: string;
+    settlement_period: number;
+    value: number;
+    published_at: string;
+    source: string;
+    provenance: Provenance;
+    publication_reconstructed: boolean;
+  }[];
+  n_observations_visible: number;
+  forecasts_used: {
+    variable: string;
+    settlement_date: string;
+    settlement_period: number;
+    point: number;
+    q10: number;
+    q90: number;
+    basis: string;
+    provenance: Provenance;
+    issued_at: string;
+  }[];
+  store_notes: string[];
+}
+
+export const replayApi = {
+  start: (req: {
+    config?: BatteryConfig;
+    day: string;
+    source: string;
+    strategy?: string;
+    auto_run?: boolean;
+  }) => jsonFetch<ReplayStatus>("/api/replay/start", { method: "POST", body: JSON.stringify(req) }),
+  step: (replay_id: string, n_steps = 1) =>
+    jsonFetch<ReplayStatus>("/api/replay/step", {
+      method: "POST",
+      body: JSON.stringify({ replay_id, n_steps }),
+    }),
+  run: (replay_id: string) =>
+    jsonFetch<ReplayStatus>("/api/replay/run", { method: "POST", body: JSON.stringify({ replay_id }) }),
+  status: (replay_id: string) => jsonFetch<ReplayStatus>(`/api/replay/${replay_id}`),
+  decisions: (replay_id: string) =>
+    jsonFetch<{ decisions: DecisionRecord[] }>(`/api/replay/${replay_id}/decisions`),
+  forecasts: (replay_id: string, step?: number) =>
+    jsonFetch<ForecastVintagePayload>(
+      `/api/replay/${replay_id}/forecasts${step !== undefined ? `?step=${step}` : ""}`,
+    ),
+  metrics: (replay_id: string) => jsonFetch<ReplayMetrics>(`/api/replay/${replay_id}/metrics`),
+  inputs: (replay_id: string, step?: number) =>
+    jsonFetch<ReplayInputsPayload>(
+      `/api/replay/${replay_id}/inputs${step !== undefined ? `?step=${step}` : ""}`,
+    ),
+  live: (req: { config?: BatteryConfig; source: string }) =>
+    jsonFetch<LiveResult>("/api/live/optimise", { method: "POST", body: JSON.stringify(req) }),
+};
+
+export const PROVENANCE_COLOR: Record<Provenance, string> = {
+  observed: "#38bdf8",
+  published_forecast: "#a78bfa",
+  model_forecast: "#c084fc",
+  reconstructed: "#f59e0b",
+  synthetic: "#64748b",
+  assumed: "#f472b6",
+  perfect_foresight: "#fbbf24",
+};
+
 export interface ForecastReport {
   model: string;
   mean_mae: number;

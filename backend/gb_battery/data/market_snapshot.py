@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -96,7 +97,7 @@ class MarketSnapshot:
         return OptimisationInputs(periods=rows, revenue_streams=revenue_streams or RevenueStreams())
 
 
-def _num(x: object) -> float | None:
+def _num(x: Any) -> float | None:
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     try:

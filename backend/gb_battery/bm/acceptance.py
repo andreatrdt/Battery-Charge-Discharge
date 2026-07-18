@@ -21,6 +21,7 @@ assumptions and clearly label estimates. This module surfaces caveats explicitly
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -86,8 +87,8 @@ def build_acceptance_features(labelled: pd.DataFrame, reference_price: float | N
 class AcceptanceModel:
     """Logistic acceptance-probability model with an accepted-volume regressor."""
 
-    clf: object
-    reg: object | None
+    clf: Any
+    reg: Any | None
     n_train: int
     base_rate: float
 
@@ -151,7 +152,7 @@ class _ConstantClassifier:
         return np.column_stack([np.full(n, 1 - self.p), np.full(n, self.p)])
 
 
-def _f(x: object) -> float:
+def _f(x: Any) -> float:
     try:
         return float(x)
     except (TypeError, ValueError):

@@ -41,6 +41,7 @@ export function MultiSeriesChart({
   rightLabel,
   leftLabel,
   zeroLine = false,
+  xRefLine,
 }: {
   data: Record<string, number | string | null>[];
   series: SeriesDef[];
@@ -49,6 +50,8 @@ export function MultiSeriesChart({
   rightLabel?: string;
   leftLabel?: string;
   zeroLine?: boolean;
+  /** Vertical marker, e.g. the NOW / as-of boundary between past and future. */
+  xRefLine?: { x: number | string; label: string; color?: string };
 }) {
   const hasRight = series.some((s) => s.yAxis === "right");
   return (
@@ -76,6 +79,20 @@ export function MultiSeriesChart({
         <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: "#d7dee6" }} />
         <Legend wrapperStyle={{ fontSize: 11 }} />
         {zeroLine && <ReferenceLine y={0} yAxisId="left" stroke={AXIS} strokeDasharray="3 3" />}
+        {xRefLine && (
+          <ReferenceLine
+            x={xRefLine.x}
+            yAxisId="left"
+            stroke={xRefLine.color || "#fbbf24"}
+            strokeWidth={1.5}
+            label={{
+              value: xRefLine.label,
+              position: "top",
+              fill: xRefLine.color || "#fbbf24",
+              fontSize: 10,
+            }}
+          />
+        )}
         {series.map((s) => {
           const yAxisId = s.yAxis || "left";
           if (s.type === "bar")

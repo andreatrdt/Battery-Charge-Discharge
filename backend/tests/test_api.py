@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
 from fastapi.testclient import TestClient
-
 from gb_battery.api.main import app
 
 warnings.filterwarnings("ignore")

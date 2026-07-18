@@ -7,6 +7,7 @@ show the last successful update per source and warn on stale data.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -69,10 +70,8 @@ class ParquetCache:
         """
         retrieved_at = retrieved_at or datetime.now(tz=UTC)
         path = self._file(source, key)
-        try:
+        with contextlib.suppress(Exception):  # caching is best-effort
             df.to_parquet(path, index=False)
-        except Exception:  # noqa: BLE001 - caching is best-effort
-            pass
         for attempt in range(2):
             try:
                 con = duckdb.connect(str(self._meta_path))

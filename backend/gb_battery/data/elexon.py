@@ -12,6 +12,7 @@ User-Agent) and every raw payload can be cached for auditability.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -258,7 +259,7 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ")
 
 
-def _f(x: object) -> float | None:
+def _f(x: Any) -> float | None:
     if x is None:
         return None
     try:
