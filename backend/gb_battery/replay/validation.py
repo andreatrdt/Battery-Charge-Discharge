@@ -76,7 +76,7 @@ class BenchmarkForecaster(PITForecaster):
             raise ValueError(f"Unknown benchmark '{method}'")
         self.method = method
 
-    def forecast(self, store, as_of, target_periods):  # type: ignore[override]
+    def forecast(self, store, as_of, target_periods):
         vintage = super().forecast(store, as_of, target_periods)
         if self.method == "internal_model":
             return vintage
@@ -304,7 +304,7 @@ def validate_price_forecasts(
 
 def validate_fundamentals(store: PITDataStore, day: date, *, n_days: int = 1) -> dict:
     """Day-ahead published forecast vs outturn for demand / wind / solar / residual."""
-    out: dict[str, dict] = {}
+    out: dict[str, object] = {}
     days = [day + timedelta(days=i) for i in range(n_days)]
     per_var: dict[str, list[dict]] = {v: [] for v in ("demand_mw", "wind_mw", "solar_mw")}
     for d in days:

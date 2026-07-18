@@ -530,9 +530,11 @@ def replay_export(replay_id: str, what: str = Query(...)) -> PlainTextResponse:
         raise HTTPException(404, f"Unknown replay '{replay_id}'.")
     buf = io.StringIO()
     if what == "proposed_schedule":
-        decisions = (
-            [d.model_dump(mode="json") for d in session.engine.decisions] if session else stored["decisions"]
-        )
+        if session is not None:
+            decisions = [d.model_dump(mode="json") for d in session.engine.decisions]
+        else:
+            assert stored is not None
+            decisions = stored["decisions"] or []
         w = csv.writer(buf)
         w.writerow(["decision_step", "settlement_date", "settlement_period", "energy_action",
                     "charge_mw", "discharge_mw", "ending_soc_mwh", "forecast_price", "expected_pnl_gbp"])
@@ -542,11 +544,11 @@ def replay_export(replay_id: str, what: str = Query(...)) -> PlainTextResponse:
                             p["charge_mw"], p["discharge_mw"], p["ending_soc_mwh"],
                             p["forecast_price"], p["expected_pnl_gbp"]])
     elif what == "attribution":
-        att = (
-            attribution(session.engine.decisions)
-            if session
-            else (stored.get("metrics") or {}).get("attribution")
-        )
+        if session is not None:
+            att = attribution(session.engine.decisions)
+        else:
+            assert stored is not None
+            att = (stored.get("metrics") or {}).get("attribution")
         if att is None:
             raise HTTPException(409, "No attribution available for this run.")
         w = csv.writer(buf)
