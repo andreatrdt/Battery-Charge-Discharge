@@ -9,8 +9,8 @@ from gb_battery.battery.config import BatteryConfig
 from gb_battery.replay.engine import DecisionRecord, ProposedPeriod, ReplayEngine, ReplayOptions
 from gb_battery.replay.metrics import attribution, trader_metrics
 from gb_battery.replay.persistence import ReplayArchive
-from gb_battery.replay.validation import BenchmarkForecaster, _point_metrics, _prob_metrics
 from gb_battery.replay.pit import store_from_synthetic
+from gb_battery.replay.validation import BenchmarkForecaster, _point_metrics, _prob_metrics
 from gb_battery.settlement import settlement_periods_for_day
 
 DAY = date(2025, 6, 2)
@@ -142,7 +142,6 @@ def test_point_metrics_and_pinball_by_hand() -> None:
     # Pinball for a single quantile, by hand: q10 forecasts 0, actual 10 →
     # loss = 0.1 × 10 = 1.0.
     import numpy as np
-
     from gb_battery.replay.validation import _pinball
 
     assert _pinball(np.array([10.0]), np.array([0.0]), 0.1) == pytest.approx(1.0)

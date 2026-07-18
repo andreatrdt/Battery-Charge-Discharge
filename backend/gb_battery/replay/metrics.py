@@ -13,7 +13,12 @@ from statistics import mean, pstdev
 
 from gb_battery.battery.config import BatteryConfig
 from gb_battery.optimiser.deterministic import optimise
-from gb_battery.replay.engine import DecisionRecord, ReplayEngine, ReplayOptions, perfect_foresight_range
+from gb_battery.replay.engine import (
+    DecisionRecord,
+    ReplayEngine,
+    ReplayOptions,
+    perfect_foresight_range,
+)
 
 PERFECT_FORESIGHT_LABEL = "Perfect foresight benchmark — not a tradable strategy."
 
