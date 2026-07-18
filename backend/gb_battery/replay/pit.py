@@ -209,6 +209,29 @@ def store_from_history_frame(
                     publication_reconstructed=True,
                 )
             )
+        # Fundamentals outturns (for forecast validation), same availability rule.
+        for var, col in [
+            ("demand_mw", "demand_outturn_mw"),
+            ("wind_mw", "wind_outturn_mw"),
+            ("solar_mw", "solar_outturn_mw"),
+        ]:
+            val = r.get(col)
+            if val is not None and not pd.isna(val):
+                obs.append(
+                    ObservationRecord(
+                        variable=var,
+                        settlement_date=day,
+                        settlement_period=sp,
+                        start_utc=start,
+                        end_utc=end,
+                        value=float(val),
+                        published_at=end + lag,
+                        source=f"{source}.outturn",
+                        provenance=provenance,
+                        unit="MW",
+                        publication_reconstructed=True,
+                    )
+                )
         fc_published = r.get("forecast_published_at")
         if fc_published is None or pd.isna(fc_published):
             # Day-ahead convention: available at 00:00 UTC on the prior day.
@@ -249,17 +272,24 @@ def store_from_synthetic(
     day: date,
     *,
     history_days: int = 14,
+    forward_days: int = 0,
     mid_lag_minutes: int = MID_LAG_MINUTES_DEFAULT,
     seed: int = 42,
 ) -> PITDataStore:
     """Synthetic PIT store: ``history_days`` of context ending at ``day``.
 
-    Fully offline and deterministic for a given (day, history_days, seed).
+    ``forward_days`` extends the store beyond ``day`` so cross-midnight
+    optimisation horizons have day-ahead forecasts (and, for completed replay
+    days, outturns) to work with. Deterministic for a given
+    (day, history_days, forward_days, seed) — extending forward never changes
+    earlier days' values because the generator draws day by day.
     """
     from gb_battery.demo.sample_data import generate_synthetic_history
 
     start = day - timedelta(days=history_days)
-    hist = generate_synthetic_history(start=start, days=history_days + 1, seed=seed)
+    hist = generate_synthetic_history(
+        start=start, days=history_days + 1 + max(forward_days, 0), seed=seed
+    )
     return store_from_history_frame(
         hist,
         source="synthetic",
@@ -297,6 +327,7 @@ def store_from_elexon(
     day: date,
     *,
     history_days: int = 14,
+    forward_days: int = 0,
     mid_lag_minutes: int = MID_LAG_MINUTES_DEFAULT,
     settings=None,
     client=None,
@@ -320,7 +351,9 @@ def store_from_elexon(
     lag = timedelta(minutes=mid_lag_minutes)
 
     frm = datetime(day.year, day.month, day.day, tzinfo=UTC) - timedelta(days=history_days)
-    to = datetime(day.year, day.month, day.day, 23, 59, tzinfo=UTC)
+    to = datetime(day.year, day.month, day.day, 23, 59, tzinfo=UTC) + timedelta(
+        days=max(forward_days, 0)
+    )
 
     # The MID endpoint rejects ranges over 7 days inclusive — fetch in chunks.
     chunks: list[pd.DataFrame] = []
@@ -359,7 +392,7 @@ def store_from_elexon(
     )
 
     day_frm = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    day_to = day_frm.replace(hour=23, minute=59)
+    day_to = day_frm.replace(hour=23, minute=59) + timedelta(days=max(forward_days, 0))
     fcs: list[ForecastRecord] = []
     try:
         dem = client.demand_forecast(day_frm, day_to)

@@ -1,28 +1,48 @@
 "use client";
 
-import { useMemo, useState } from "react";
 import Link from "next/link";
+import { useMemo, useState } from "react";
+import { BatteryVisual } from "../components/BatteryVisual";
+import { Learn, ProvBadge } from "../components/learn";
+import { MarketTimeline } from "../components/MarketTimeline";
+import { SettlementTable } from "../components/SettlementTable";
+import { Disclaimer, ErrorNote, Panel, Spinner, Stat } from "../components/ui";
 import { gbp, num, type PeriodResult } from "../lib/api";
 import { useOptimise } from "../lib/hooks";
 import { useAppState } from "../lib/store";
-import { SettlementTable } from "../components/SettlementTable";
-import { ActionBadge, Disclaimer, ErrorNote, Panel, Spinner, Stat } from "../components/ui";
+
+type PeriodWithSplit = PeriodResult & {
+  energy_action?: "CHARGE" | "DISCHARGE" | "IDLE";
+  flexibility_position?: "NONE" | "UP" | "DOWN" | "BOTH";
+};
+
+function energyAction(p: PeriodWithSplit): "CHARGE" | "DISCHARGE" | "IDLE" {
+  if (p.energy_action) return p.energy_action;
+  if (p.charge_mw > 1e-4) return "CHARGE";
+  if (p.discharge_mw > 1e-4) return "DISCHARGE";
+  return "IDLE";
+}
+
+function flexibility(p: PeriodWithSplit): "NONE" | "UP" | "DOWN" | "BOTH" {
+  if (p.flexibility_position) return p.flexibility_position;
+  const up = p.upward_reserved_mw > 1e-4;
+  const down = p.downward_reserved_mw > 1e-4;
+  return up && down ? "BOTH" : up ? "UP" : down ? "DOWN" : "NONE";
+}
 
 export default function TerminalPage() {
   const [mode, setMode] = useState("deterministic");
   const [riskAversion, setRiskAversion] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
-  const { day, source } = useAppState();
+  const { day, source, config } = useAppState();
 
   const extra = mode === "stochastic" ? { risk_aversion: riskAversion, n_scenarios: 25 } : {};
   const { result, warnings, loading, error, run } = useOptimise(mode, extra);
 
-  // With the Elexon source on a completed day, the day's realised MID prices are
-  // fed straight into the optimiser: that is hindsight, not a tradable strategy.
   const isHindsight = source === "elexon" && day < new Date().toISOString().slice(0, 10);
 
-  const selectedPeriod = useMemo<PeriodResult | null>(
-    () => result?.periods.find((p) => p.settlement_period === selected) || null,
+  const selectedPeriod = useMemo<PeriodWithSplit | null>(
+    () => (result?.periods.find((p) => p.settlement_period === selected) as PeriodWithSplit | undefined) || null,
     [result, selected],
   );
 
@@ -32,7 +52,8 @@ export default function TerminalPage() {
         <div>
           <h1 className="text-lg font-semibold">Optimisation Terminal</h1>
           <p className="text-xs text-terminal-muted">
-            Half-hourly co-optimised charge/discharge/reserve schedule. Click a row to inspect why.
+            Single-shot planning view. Energy action and flexibility allocation are shown separately;
+            click a row to inspect the physical and economic logic.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -53,6 +74,8 @@ export default function TerminalPage() {
         </div>
       </div>
 
+      <MarketTimeline highlight="intraday" />
+
       {isHindsight ? (
         <div className="rounded border border-kind-estimated/50 bg-kind-estimated/15 px-3 py-2 text-xs text-kind-estimated">
           <strong>Perfect-foresight view — not a tradable strategy.</strong> The Elexon source on a
@@ -67,18 +90,19 @@ export default function TerminalPage() {
       ) : (
         <Disclaimer>
           <strong>Single-shot planning view.</strong> One whole-day optimisation on the currently
-          selected inputs (see badges for provenance). For decision-by-decision simulation with
-          point-in-time information, use the Replay &amp; Live page.
+          selected inputs. For decision-by-decision simulation with point-in-time information, use
+          Replay &amp; Live.
         </Disclaimer>
       )}
 
       <Disclaimer>
-        <strong>Sign convention.</strong> P&amp;L is positive = revenue. Charging at a{" "}
-        <em>negative</em> price is revenue (paid to consume). MW columns show power at the grid
-        connection; SoC is stored energy (MWh). Service &amp; BM revenue lines are{" "}
-        <strong>experimental / assumption-based</strong> (default availability prices and BM margins
-        are assumptions, not observed market awards) and are excluded from the credible rolling
-        strategy on the Replay page.
+        <strong>Sign convention and scope.</strong> P&amp;L positive = revenue. Charging at a negative
+        price is revenue. MW is power at the grid connection; MWh is stored energy. Service and BM
+        values are <strong>experimental / assumption-based</strong> and belong in the{" "}
+        <Link href="/lab" className="underline">
+          Reserve &amp; BM Laboratory
+        </Link>
+        . They are excluded from the credible rolling replay headline P&amp;L.
       </Disclaimer>
 
       {error && <ErrorNote error={error} />}
@@ -87,10 +111,10 @@ export default function TerminalPage() {
       {result && !loading && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-            <Stat label="Total expected P&L" value={gbp(result.total_expected_pnl_gbp)} accent="#22c55e" />
+            <Stat label="Total expected model P&L" value={gbp(result.total_expected_pnl_gbp)} accent="#22c55e" sub="single-shot objective" />
             <Stat label="Wholesale" value={gbp(result.total_wholesale_pnl_gbp)} />
-            <Stat label="Service (avail)" value={gbp(result.total_service_pnl_gbp)} sub="experimental / assumed" />
-            <Stat label="BM activation" value={gbp(result.total_bm_activation_pnl_gbp)} sub="experimental / assumed" />
+            <Stat label="Service availability" value={gbp(result.total_service_pnl_gbp)} sub="experimental / assumed" />
+            <Stat label="Expected BM activation" value={gbp(result.total_bm_activation_pnl_gbp)} sub="experimental / assumed" />
             <Stat label="Degradation" value={`−${gbp(result.total_degradation_cost_gbp)}`} accent="#ef4444" />
             <Stat label="Full cycles" value={num(result.full_cycle_equivalents, 2)} sub={`solver: ${result.solver}`} />
           </div>
@@ -101,48 +125,99 @@ export default function TerminalPage() {
 
           <SettlementTable periods={result.periods} onSelect={setSelected} selected={selected} />
 
-          {selectedPeriod && <PeriodDetail p={selectedPeriod} />}
+          {selectedPeriod && <PeriodDetail p={selectedPeriod} config={config} />}
         </>
       )}
     </div>
   );
 }
 
-function PeriodDetail({ p }: { p: PeriodResult }) {
+function PeriodDetail({
+  p,
+  config,
+}: {
+  p: PeriodWithSplit;
+  config: {
+    energy_capacity_mwh: number;
+    maximum_charge_mw: number;
+    maximum_discharge_mw: number;
+    discharge_efficiency: number;
+  };
+}) {
   return (
-    <Panel title={`Inspect — SP${p.settlement_period}`} right={<ActionBadge action={p.action} />}>
-      <div className="grid md:grid-cols-3 gap-4 text-xs">
-        <div>
-          <h3 className="text-terminal-muted mb-1">Decision</h3>
-          <ul className="space-y-0.5 tabular">
-            <li>Charge: {num(p.charge_mw)} MW ({num(p.energy_charged_mwh)} MWh)</li>
-            <li>Discharge: {num(p.discharge_mw)} MW ({num(p.energy_discharged_mwh)} MWh)</li>
-            <li>SoC: {num(p.beginning_soc_mwh)} → {num(p.ending_soc_mwh)} MWh</li>
-            <li>Reserve up/down: {num(p.upward_reserved_mw)} / {num(p.downward_reserved_mw)} MW</li>
-          </ul>
+    <Panel
+      title={`Inspect — SP${p.settlement_period}`}
+      right={
+        <div className="flex items-center gap-2 text-[10px]">
+          <SplitBadge label={`ENERGY: ${energyAction(p)}`} color={energyAction(p) === "CHARGE" ? "#22c55e" : energyAction(p) === "DISCHARGE" ? "#ef4444" : "#7c8896"} />
+          <SplitBadge label={`FLEX: ${flexibility(p)}`} color={flexibility(p) === "NONE" ? "#7c8896" : "#c084fc"} />
         </div>
-        <div>
-          <h3 className="text-terminal-muted mb-1">Objective contribution</h3>
-          <ul className="space-y-0.5 tabular">
-            <li>Wholesale: {gbp(p.wholesale_pnl_gbp)}</li>
-            <li>Service: {gbp(p.service_pnl_gbp)}</li>
-            <li>BM activation: {gbp(p.bm_activation_pnl_gbp)}</li>
-            <li>Degradation: −{gbp(p.degradation_cost_gbp)}</li>
-            <li className="font-semibold">Total: {gbp(p.total_expected_pnl_gbp)}</li>
-          </ul>
-        </div>
-        <div>
-          <h3 className="text-terminal-muted mb-1">Marginal values &amp; constraints</h3>
-          <ul className="space-y-0.5 tabular">
-            <li>Value of stored MWh: {p.marginals.stored_energy_gbp_per_mwh != null ? gbp(p.marginals.stored_energy_gbp_per_mwh, 1) : "—"}</li>
-            <li>Value of empty MWh: {p.marginals.empty_capacity_gbp_per_mwh != null ? gbp(p.marginals.empty_capacity_gbp_per_mwh, 1) : "—"}</li>
-            <li>Binding: {p.binding_constraints.join(", ") || "none"}</li>
-          </ul>
+      }
+    >
+      <div className="grid gap-5 lg:grid-cols-[22rem_1fr]">
+        <BatteryVisual
+          socMwh={p.ending_soc_mwh}
+          capacityMwh={config.energy_capacity_mwh}
+          chargeMw={p.charge_mw}
+          dischargeMw={p.discharge_mw}
+          maxChargeMw={config.maximum_charge_mw}
+          maxDischargeMw={config.maximum_discharge_mw}
+          upCapabilityMw={p.upward_reserved_mw}
+          downCapabilityMw={p.downward_reserved_mw}
+          dischargeEfficiency={config.discharge_efficiency}
+        />
+
+        <div className="grid md:grid-cols-3 gap-4 text-xs">
+          <div>
+            <h3 className="text-terminal-muted mb-1">Physical decision</h3>
+            <ul className="space-y-0.5 tabular">
+              <li>Energy action: <strong>{energyAction(p)}</strong></li>
+              <li>Flexibility position: <strong>{flexibility(p)}</strong></li>
+              <li>Charge: {num(p.charge_mw)} MW ({num(p.energy_charged_mwh)} MWh)</li>
+              <li>Discharge: {num(p.discharge_mw)} MW ({num(p.energy_discharged_mwh)} MWh)</li>
+              <li>SoC: {num(p.beginning_soc_mwh)} → {num(p.ending_soc_mwh)} MWh</li>
+              <li>Up/down capability: {num(p.upward_reserved_mw)} / {num(p.downward_reserved_mw)} MW</li>
+            </ul>
+          </div>
+          <div>
+            <h3 className="text-terminal-muted mb-1">Objective contribution</h3>
+            <ul className="space-y-0.5 tabular">
+              <li>Wholesale: {gbp(p.wholesale_pnl_gbp)}</li>
+              <li>Availability: {gbp(p.service_pnl_gbp)} <ProvBadge p="assumed" /></li>
+              <li>Expected BM activation: {gbp(p.bm_activation_pnl_gbp)} <ProvBadge p="experimental" /></li>
+              <li>Degradation: −{gbp(p.degradation_cost_gbp)}</li>
+              <li className="font-semibold">Total model value: {gbp(p.total_expected_pnl_gbp)}</li>
+            </ul>
+          </div>
+          <div>
+            <h3 className="text-terminal-muted mb-1">Marginals and constraints</h3>
+            <ul className="space-y-0.5 tabular">
+              <li>Value of stored MWh: {p.marginals.stored_energy_gbp_per_mwh != null ? gbp(p.marginals.stored_energy_gbp_per_mwh, 1) : "—"}</li>
+              <li>Value of empty MWh: {p.marginals.empty_capacity_gbp_per_mwh != null ? gbp(p.marginals.empty_capacity_gbp_per_mwh, 1) : "—"}</li>
+              <li>Binding: {p.binding_constraints.join(", ") || "none"}</li>
+            </ul>
+          </div>
         </div>
       </div>
       <p className="mt-3 rounded border border-terminal-border bg-terminal-bg px-3 py-2 text-sm text-terminal-text">
         {p.explanation}
       </p>
+      <Learn title="Why two labels instead of one action?">
+        <p>
+          Charging, discharging and idling describe the energy that actually changes SoC. Up/down
+          flexibility describes how far the battery could move from that operating point. An idle
+          battery can therefore have energy action <strong>IDLE</strong> and flexibility position
+          <strong> BOTH</strong> at the same time.
+        </p>
+      </Learn>
     </Panel>
+  );
+}
+
+function SplitBadge({ label, color }: { label: string; color: string }) {
+  return (
+    <span className="rounded px-1.5 py-0.5 font-bold" style={{ color, backgroundColor: `${color}1f` }}>
+      {label}
+    </span>
   );
 }

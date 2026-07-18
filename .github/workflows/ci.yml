@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -15,16 +18,41 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install
-        run: pip install -e "backend[dev]"
+        run: pip install --quiet -e "backend[dev]"
       - name: Ruff
+        id: ruff
         working-directory: backend
-        run: ruff check gb_battery tests
+        run: ruff check gb_battery tests > ruff.txt 2>&1
+      - name: Upload Ruff diagnostics
+        if: failure() && steps.ruff.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-ruff
+          path: backend/ruff.txt
       - name: Mypy
+        id: mypy
         working-directory: backend
-        run: mypy gb_battery
+        run: mypy gb_battery > mypy.txt 2>&1
+      - name: Upload Mypy diagnostics
+        if: failure() && steps.mypy.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-mypy
+          path: backend/mypy.txt
       - name: Pytest
+        id: pytest
         working-directory: backend
-        run: pytest
+        run: pytest -q > pytest.txt 2>&1
+      - name: Upload Pytest diagnostics
+        if: failure() && steps.pytest.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest
+          path: backend/pytest.txt
+      - name: Show Pytest summary
+        if: success()
+        working-directory: backend
+        run: tail -n 2 pytest.txt
 
   frontend:
     runs-on: ubuntu-latest
@@ -39,10 +67,17 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install
-        run: npm ci
+        run: npm ci --silent
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Lint
-        run: npx next lint
+        id: lint
+        run: npx next lint --quiet > lint.txt 2>&1
+      - name: Upload lint diagnostics
+        if: failure() && steps.lint.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-lint
+          path: frontend/lint.txt
       - name: Build
         run: npm run build

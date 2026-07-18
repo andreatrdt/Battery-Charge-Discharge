@@ -1,217 +1,268 @@
 # GB Battery Co-Optimisation Terminal
 
-A research & decision-support platform showing how a battery trader in **Great Britain**
-could combine public market data, forecasts, balancing data and constrained optimisation
-to decide how much a battery should **charge, discharge or keep available** during each
-half-hourly **Settlement Period**.
+A full-stack research and learning terminal for understanding how a GB battery trader
+could turn point-in-time market information into charge/discharge decisions, then audit
+those decisions against what actually happened.
 
-> **Disclaimer.** This is a research and decision-support project (built for a CV /
-> portfolio). It is **not** a live trading or asset-control system. It submits **no**
-> market orders, controls **no** physical asset, and makes **no** claim of proprietary
-> data access or affiliation with any employer. Public data only (Elexon & NESO open
-> licences). No EPEX order-book data is included or redistributed. Backtested returns
-> are illustrative and are **not** achievable in live trading.
+> **Research only.** This project submits no orders, controls no physical asset and does
+> not contain licensed EPEX order-book data. Elexon MID is used as a public wholesale
+> reference price, not as a guaranteed executable bid or ask. All paper P&L is illustrative.
 
----
+## What the project now does
 
-## What it demonstrates
+- Builds a **point-in-time information set** for every decision gate
+  (`published_at <= as_of`, machine-audited).
+- Forecasts the next **24, 48 or 72 hours**; 48 hours is the default.
+- Optimises the complete cross-day horizon in Pyomo/HiGHS.
+- Executes only the **next Settlement Period**, then reforecasts and reoptimises.
+- Carries SoC, cycle usage, degradation and P&L continuously across midnight and DST days.
+- Reports an explicit **continuation value** for energy left at horizon end.
+- Separates requested from executed volume through ideal, simple and stress execution assumptions.
+- Compares rolling decisions with simple forecast/strategy benchmarks and perfect foresight.
+- Persists completed replay sessions to DuckDB with data/model/configuration version stamps.
+- Provides a visual Learning mode, market-process timeline, battery diagram, decision alternatives,
+  trader metrics, P&L attribution, forecast heatmaps and regime analysis.
+- Keeps reserve/BM economics in a separate **experimental laboratory**, outside credible
+  wholesale replay P&L.
 
-- GB power-market structure (wholesale, Balancing Mechanism, imbalance settlement)
-- Battery **state-of-charge optimisation** with physical & economic constraints
-- A **point-in-time replay engine**: for any decision at time *t*, it can be proven
-  that every input was published at or before *t* (machine-checked leakage audit)
-- **Rolling-horizon operation**: forecast → optimise → execute one Settlement Period →
-  settle against the published outturn → carry SoC forward
-- **Historical Replay, Live Paper Trading and a Perfect-Foresight benchmark** as three
-  strictly separated modes (hindsight is labelled, never mixed into strategy results)
-- Real public-API ingestion with **data lineage** (source / retrieval / publication / event timestamps)
-- **Rigorous, chronological** time-series forecasting (no leakage, quantile bands, vintages)
-- **Constrained optimisation** in Pyomo solved with the open-source HiGHS solver
-- **Scenario & stochastic** optimisation with a CVaR risk penalty
-- A **trader-focused** web interface that explains *why* each action was chosen
+## Three modes that must not be confused
 
-### Replay & Live Trading (the centrepiece)
+| Mode | Information used | Output |
+|---|---|---|
+| **Historical Replay** | Only records available at each historical gate | Realised paper P&L from the actions actually selected step by step |
+| **Live Paper Trading** | Information available up to the current time | Settled past paper P&L plus a forecast-only future proposal |
+| **Perfect Foresight** | The complete realised path | Non-tradable upper benchmark only |
 
-The **Replay & Live** page answers: *at every historical or live decision timestamp,
-what information was available, what did the model forecast, what action did it
-choose, and how did that decision perform once the actual outcome became known?*
+A completed historical replay does **not** rewrite earlier actions after later actual prices
+become visible. That difference from perfect foresight is the economic cost of imperfect
+information and forecasting.
 
-- **Historical Replay** steps through a completed day chronologically; each decision
-  gate sees only records with `published_at ≤ as_of` (MID availability is
-  reconstructed as period end + 10 min and flagged as such).
-- **Live Paper Trading** applies the same loop to today: settled paper P&L for
-  completed periods, forecast-only for the future — future actuals are null by
-  construction. No orders are submitted anywhere.
-- **Perfect Foresight** optimises on the realised path and is labelled
-  *"not a tradable strategy"* — it exists only as an upper bound.
+## Core decision loop
 
-The credible headline P&L is **wholesale-only** (realised wholesale P&L −
-degradation); reserve/BM revenue elsewhere in the app is labelled
-*experimental / assumption-based*. Execution is assumed at the MID reference price —
-no spread, liquidity, partial fills or market impact are modelled. See
-[docs/replay_methodology.md](docs/replay_methodology.md).
+```text
+Decision time t
+    ↓
+Point-in-time data: published_at ≤ t
+    ↓
+Forecast the next 24/48/72 hours
+    ↓
+Optimise the complete remaining horizon
+    ↓
+Apply continuation value at horizon end
+    ↓
+Execute only the first half-hour through the selected execution model
+    ↓
+Settle once the outturn is published
+    ↓
+Carry SoC / cycles / P&L forward and repeat
+```
+
+## Pages
+
+- **Market** — observed/forecast fundamentals, MID and imbalance settlement price.
+- **Battery** — power, energy, efficiency, grid and degradation configuration.
+- **Terminal** — single-shot deterministic/stochastic/robust optimisation, clearly labelled.
+- **Replay & Live** — cross-day point-in-time historical replay and live paper trading.
+- **Forecast Validation** — benchmark forecasts, probabilistic calibration, heatmaps and
+  downstream strategy P&L.
+- **Schedule** — single-shot planned schedule; not the rolling replay result.
+- **Scenario Lab** — deterministic and stochastic stress exploration.
+- **Backtest** — legacy multi-day strategy comparison.
+- **Reserve & BM Lab** — experimental physical capability and assumed service economics.
+- **Data & Audit** — exact decision inputs, provenance, exports and persistent replay archive.
+- **Methodology** — market structure, equations, metrics and limitations.
+
+## Battery model
+
+The default asset is a 50 MW / 100 MWh battery. MW is power; MWh is energy:
+
+```text
+Energy (MWh) = Power (MW) × Time (h)
+50 MW × 0.5 h = 25 MWh
+```
+
+The SoC transition is:
+
+```text
+soc[t+1] = soc[t] + η_charge × charge[t] × Δt
+                      − discharge[t] × Δt / η_discharge
+```
+
+The MILP also models:
+
+- no simultaneous charging and discharging;
+- charge/discharge and grid limits;
+- minimum/maximum SoC;
+- degradation per MWh of throughput;
+- cycle limits;
+- terminal/continuation value;
+- optional ramp and operating-band limits;
+- conservative reserve-capability constraints in the experimental model.
+
+**Energy action** (`CHARGE`, `DISCHARGE`, `IDLE`) and **flexibility position**
+(`UP`, `DOWN`, `BOTH`, `NONE`) are displayed separately. Flexibility is a physical
+capability estimate, not proof of a reserve award or activation.
+
+## Forecast validation
+
+The internal point-in-time forecast is compared with:
+
+- persistence;
+- same Settlement Period yesterday;
+- same Settlement Period last week;
+- seven-day same-SP rolling median;
+- weekday/SP climatology.
+
+Metrics include:
+
+- MAE, RMSE, bias and correlation;
+- directional accuracy and ramp error;
+- peak/trough timing error;
+- q10/q50/q90 pinball loss;
+- q10–q90 coverage and interval width;
+- error by Settlement Period and hours ahead;
+- downstream rolling-strategy P&L.
+
+A model is not declared better solely because its MAE is lower. The terminal also checks
+whether it creates more net economic value after battery constraints and execution costs.
+
+## Trader metrics
+
+Completed replays expose:
+
+- gross and net realised paper P&L;
+- expected-versus-realised P&L surprise;
+- hit rate, average win/loss, payoff ratio and profit factor;
+- maximum drawdown, P&L volatility, historical VaR and Expected Shortfall;
+- perfect-foresight capture and regret;
+- requested/executed/unfilled volume and turnover;
+- spread, slippage and fee assumptions;
+- charge/discharge throughput, cycles, degradation and time near physical limits;
+- performance and forecast error by transparent market regime.
+
+The P&L waterfall reconciles expected model P&L to realised net P&L through price,
+volume, execution-cost and residual/interaction effects without inventing false precision.
+
+## Execution assumptions
+
+| Mode | Treatment |
+|---|---|
+| **Ideal** | Full simulated fill at MID; theoretical reference-price benchmark |
+| **Simple** | Configurable spread, fee, slippage and maximum executable power |
+| **Stress** | Wider costs and lower executable volume |
+
+Executed volume—not requested volume—drives SoC. These are transparent assumptions,
+not reconstructed exchange fills.
+
+## Data and provenance
+
+Sources include public Elexon Insights/BMRS endpoints and a bundled seeded synthetic sample.
+Every important value is labelled as observed, published forecast, internal model forecast,
+reconstructed, synthetic, assumed, paper trade, experimental or perfect foresight.
+
+MID has no per-record publication timestamp. Historical availability is therefore
+reconstructed as Settlement Period end plus a configurable lag (10 minutes by default)
+and flagged accordingly.
 
 ## Architecture
 
-```
- External APIs            Raw data layer         Validation /            Feature store
- (Elexon, NESO)   ─────▶  (typed adapters,  ───▶ normalisation    ───▶  (leakage-safe
-   + CSV upload           raw payloads,           (Pandera schemas,       features)
-   + synthetic            lineage, cache)         Europe/London tz)          │
-                                                                             ▼
-   Web dashboard   ◀────  FastAPI      ◀────  Optimiser (Pyomo/HiGHS)  ◀── Forecasts &
-   (Next.js, TS,          (REST API)          deterministic / stochastic    scenarios
-    Recharts,                                 / CVaR + rolling horizon
-    TanStack Table)                                    ▲
-                                                       ├── Replay engine (PIT store:
-                                                       │   published_at ≤ as_of,
-                                                       │   forecast vintages, rolling
-                                                       │   execute-one-period loop,
-                                                       │   leakage audit, live paper)
-                                                       └── Backtester (benchmarks,
-                                                           perfect-foresight bound,
-                                                           leakage audit)
+```text
+Next.js / TypeScript frontend
+        ↓ REST
+FastAPI routers and typed schemas
+        ↓
+Point-in-time data store + Elexon adapters + Parquet/DuckDB persistence
+        ↓
+Forecast vintages and benchmark validation
+        ↓
+Pyomo MILP → HiGHS
+        ↓
+Execution model → settlement → replay metrics / audit / charts
 ```
 
-See [docs/architecture.md](docs/architecture.md) for detail.
+Key directories:
 
-## Repository layout
-
-```
-backend/            Python 3.12 package `gb_battery` + tests
-  gb_battery/
-    settlement.py       GB Settlement Period calendar (DST-aware: 46/48/50 SPs)
-    battery/            BatteryConfig (physical & economic parameters)
-    optimiser/          Pyomo model, solver, deterministic co-optimisation, explanations
-    data/               Elexon + NESO adapters, providers, lineage, cache, market snapshot
-    forecast/           Leakage-safe features, baselines, quantile models, chronological CV
-    scenario/           Scenario generation, Scenario Lab, stochastic + CVaR optimiser
-    backtest/           Daily backtest engine, benchmarks, leakage audit, metrics
-    replay/             Point-in-time store, PIT forecaster, rolling replay engine,
-                        benchmarks (perfect foresight labelled), session registry
-    bm/                 BM acceptance research module (exploratory)
-    api/                FastAPI app (routers: market, optimise, analysis, data, replay)
-    demo/               Synthetic scenarios + frozen public-data sample
-    data_samples/       Frozen synthetic Parquet (offline demo)
-  tests/                pytest suite (98 tests)
-frontend/           Next.js + TypeScript + Tailwind + Recharts + TanStack Table
-docs/               Architecture, data sources, methodology, model, backtesting, limitations
+```text
+backend/gb_battery/
+  api/          FastAPI application and routers
+  battery/      asset configuration
+  data/         Elexon/NESO adapters, cache and provenance
+  forecast/     chronological forecasting utilities
+  optimiser/    Pyomo/HiGHS model and result extraction
+  replay/       PIT store, forecasts, cross-day engine, execution, metrics,
+                alternatives, continuation value and persistence
+  scenario/     stochastic and robust research tools
+  backtest/     legacy daily backtest
+frontend/app/
+  replay/       rolling replay and live paper UI
+  validation/   forecast validation dashboard
+  lab/          reserve/BM laboratory
+  components/   charts, battery visual, learning components and timeline
 ```
 
-## Quick start
+## Run locally
 
-### Option A — Docker (one command)
+### Backend
+
+```powershell
+cd C:\Users\andre\git_repos\Battery-Charge-Discharge
+.\.venv\Scripts\python.exe -m uvicorn gb_battery.api.main:app `
+    --app-dir backend `
+    --host 127.0.0.1 `
+    --port 8000
+```
+
+Health check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/health
+```
+
+### Frontend
+
+```powershell
+cd C:\Users\andre\git_repos\Battery-Charge-Discharge\frontend
+npm ci
+npm run dev
+```
+
+Open `http://localhost:3000/replay`.
+
+### Docker
 
 ```bash
 docker compose up --build
-# Frontend: http://localhost:3000   API: http://localhost:8000/docs
 ```
 
-### Option B — local (Python + Node)
+Docker files are included, but should still be treated as environment-dependent until
+verified on the target machine.
+
+## Verification
 
 ```bash
-# 1. Backend
-make install            # creates .venv and installs backend[dev]
-make ingest-demo        # builds the offline demo snapshot (no network needed)
-make test               # run the 98-test suite
-make run                # FastAPI on http://localhost:8000  (add GBB_OFFLINE=1 for offline)
+cd backend
+python -m pytest
+ruff check gb_battery tests
+mypy gb_battery
 
-# 2. Frontend (separate terminal)
-make install-frontend
-make run-frontend       # Next.js on http://localhost:3000
+cd ../frontend
+npx tsc --noEmit
+npx next lint
+npm run build
 ```
 
-On Windows without `make`, run the underlying commands in [docs/deployment.md](docs/deployment.md).
+CI runs the same backend static checks/test suite and frontend typecheck/lint/production build.
 
-### Try it without the network
+## Main limitations
 
-Everything runs **offline** using the frozen synthetic sample and demo scenarios:
+- No EPEX bid/ask order book, depth, latency, partial-fill randomness or market impact data.
+- MID is a public reference, not a guaranteed executable price.
+- Execution modes are simulated assumptions.
+- The internal forecast is a transparent baseline, not a production power-price model.
+- Reserve procurement, product-specific stacking, accepted awards, real activations and
+  non-delivery penalties are not yet faithfully replayed.
+- No live market orders, asset telemetry integration or operational controls.
+- Perfect foresight is an unattainable benchmark, never a strategy.
 
-```bash
-GBB_OFFLINE=1 make run                          # backend serves synthetic/demo data
-python -m gb_battery.cli backtest --days 21     # rolling backtest, prints a summary
-```
-
-## Data sources
-
-| Source | Datasets used | Licence |
-|--------|---------------|---------|
-| **Elexon Insights (BMRS)** | Market Index Data (MID), system/imbalance prices, demand outturn & forecast, wind/solar forecast, generation by fuel, BOD, BOALF | Elexon open data — attribute Elexon |
-| **NESO data portal (CKAN)** | Demand/forecasts, balancing & constraint costs, EAC/DC/DM/DR & reserve services | Dataset-specific open licences — attribute NESO |
-| **EPEX SPOT** | *(none included)* — licensed order-book data; only a documented stub adapter | Not redistributed |
-| **User CSV** | price forecasts, order-book depth, telemetry, contracted positions, service prices | your own |
-
-Endpoint paths & field names were confirmed against the live APIs (see
-[docs/data_sources.md](docs/data_sources.md)), not assumed.
-
-## Mathematical formulation (summary)
-
-For each Settlement Period *t* of duration Δt:
-
-**State of charge**
-```
-soc[t+1] = soc[t] + η_c · charge_mw[t] · Δt − discharge_mw[t] · Δt / η_d
-soc_min ≤ soc[t] ≤ soc_max
-```
-
-**No simultaneous charge/discharge** (binaries): `cbin[t] + dbin[t] ≤ 1`, with
-`0 ≤ charge ≤ P_c·cbin`, `0 ≤ discharge ≤ P_d·dbin`.
-
-**Conservative reserve headroom** (power and energy-duration), grid import/export limits,
-ramp and daily-cycle limits, and a terminal-SoC floor + value.
-
-**Objective (maximise)** wholesale + service availability + expected BM activation +
-terminal value, minus charging cost, degradation, efficiency losses and imbalance
-exposure — avoiding double-counting the same energy/capacity. See
-[docs/optimisation_model.md](docs/optimisation_model.md).
-
-## Example result
-
-A single-day **rolling point-in-time replay** (50 MW / 100 MWh demo battery, bundled
-synthetic sample, 2025-01-15): at each of the 48 gates the model forecast the rest of
-the day from information published before the gate, optimised, and committed one
-period. All 48 decisions passed the leakage audit.
-
-| Strategy (same information sets) | Realised P&L | Capture of perfect foresight |
-|----------------------------------|--------------|------------------------------|
-| No-operation | £0 | 0% |
-| Rolling threshold rule | ~£6.9k | ~62% |
-| **Rolling forecast optimiser** | **~£10.2k** | **~91%** |
-| Perfect foresight (labelled upper bound) | ~£11.2k | 100% |
-
-1-step-ahead forecast MAE ≈ £7.4/MWh, bias ≈ −£0.3/MWh.
-*(Synthetic sample; illustrative only — not achievable live.)*
-
-## Testing
-
-```bash
-make test        # pytest: settlement/DST, constraints, the 6 deterministic cases,
-                 # economics, forecasting, backtest ordering, scenario/stochastic, API,
-                 # and the replay suite (PIT filtering, leakage rejection, SoC carry,
-                 # first-action-only execution, 46/48/50-SP days, reproducibility,
-                 # live-mode null future actuals, a hand-verifiable 3-period case)
-make lint        # ruff
-make typecheck   # mypy (backend)
-cd frontend && npm run build   # Next.js production build + type-check
-```
-
-The suite includes the six named deterministic acceptance cases (negative-price charging,
-capacity preservation, service value preservation, degradation-aware cycling, terminal SoC).
-
-## Data limitations
-
-- Market Index Data is a **short-term wholesale reference**, not a full live EPEX order book.
-- MID has no per-record publish time; replay availability is **reconstructed** as
-  period end + 10 minutes and flagged `publication_reconstructed` in every record.
-- Reserve constraints are **conservative simplifications** of real DC/DM/DR & Balancing Reserve rules.
-- BM acceptance modelling is **exploratory**; the production optimiser uses user/historical
-  service-value assumptions and labels every estimate.
-- Synthetic/estimated inputs are for demonstration and **clearly distinguished** from observed data in the UI.
-
-See [docs/limitations.md](docs/limitations.md).
-
-## Licence
-
-Code: MIT (see [LICENSE](LICENSE)). Third-party **data** is governed by Elexon and NESO open
-licences; EPEX order-book data is licensed and **not** included. Attribute Elexon and NESO
-when redistributing data.
+See [`docs/replay_methodology.md`](docs/replay_methodology.md),
+[`docs/limitations.md`](docs/limitations.md) and the in-app Methodology page for details.
