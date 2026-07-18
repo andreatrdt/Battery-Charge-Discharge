@@ -15,103 +15,161 @@ able to prove, not just assert:
 | **Live Paper Trading** | Point-in-time information up to *now* | Outturns as they publish | Same loop, applied to today |
 | **Perfect Foresight** | The realised price path | The realised price path | Labelled upper bound only |
 
-Perfect foresight is computed and displayed **only** as a benchmark
-("Perfect foresight benchmark — not a tradable strategy") and is never mixed into
-replay or paper-trading P&L.
+Perfect foresight is computed and displayed **only** as a benchmark and is never mixed
+into replay or paper-trading P&L.
 
-## The rolling decision loop
+## The cross-day rolling decision loop
 
-For each Settlement Period *t* of the chosen day, in chronological order:
+For each executed Settlement Period *t*, in chronological order:
 
-1. **Gate**: the decision timestamp `as_of` is the period's start instant.
-2. **Information set**: the `PITDataStore` returns only records with
-   `published_at <= as_of`. This filter is the *single* gateway to data during a
-   replay; a record that postdates the gate raises `PITViolation`.
-3. **Forecast**: the `PITForecaster` issues a vintage for every remaining period
-   (point + q10/q50/q90), recording the newest input publication time it used.
-4. **Optimise**: the existing Pyomo/HiGHS deterministic optimiser runs on the
-   remaining horizon with **wholesale-only** revenue streams, the current SoC, the
-   *remaining* daily cycle budget, and the end-of-day terminal-SoC constraints.
-5. **Execute one period**: only the first action of the proposed schedule is
-   committed (physically clamped). The full proposed schedule is stored so the UI
-   can show how the plan evolved.
-6. **Settle**: once the period's outturn is published, realised P&L
-   (`actual_price × net_export × Δt − degradation`) and the forecast error are
-   recorded. In live mode an unpublished outturn leaves the decision `pending`.
-7. **Carry state**: SoC, cumulative discharge (cycle budget) and cumulative P&L
-   persist to the next gate. The battery is never reset intra-day.
+1. **Gate**: `as_of` is the period start.
+2. **Information set**: `PITDataStore` returns only records with
+   `published_at <= as_of`; a violation raises `PITViolation`.
+3. **Forecast**: `PITForecaster` issues a point + q10/q50/q90 vintage for the full
+   configured optimisation horizon.
+4. **Cross-day horizon**: 24, 48 or 72 hours (48 by default), built with the DST-aware
+   settlement calendar and allowed to cross midnight.
+5. **Continuation estimate**: an explicit £/MWh value is assigned to stored energy at
+   horizon end using forecast prices beyond the active horizon.
+6. **Optimise**: Pyomo/HiGHS solves the wholesale-only battery problem with current SoC,
+   physical limits and remaining cycle budget.
+7. **Execute one period**: only the first proposed action enters the execution model.
+8. **Execution**: requested and executed MW are stored separately; simulated spread,
+   slippage, fees and volume limits may reduce the fill. Executed volume drives SoC.
+9. **Settle**: once the outturn is published, gross reference-price P&L, execution costs,
+   degradation and net realised paper P&L are recorded.
+10. **Carry state**: SoC, daily/cumulative cycles, P&L and decision history continue
+    across midnight. Nothing resets merely because the calendar date changes.
 
-The engine is deterministic: identical options reproduce an identical decision log.
+The full proposed schedule from every vintage is retained, although only its first
+period is executed. This makes replanning auditable.
+
+## Energy action versus flexibility
+
+The API and UI expose two independent concepts:
+
+- **energy action**: `CHARGE`, `DISCHARGE` or `IDLE`; this changes SoC;
+- **flexibility position**: `UP`, `DOWN`, `BOTH` or `NONE`; this is a physical capability
+  estimate around the operating point.
+
+An idle battery can therefore be `IDLE + BOTH`. Flexibility is not evidence of a
+reserve offer, award, availability payment or activation.
 
 ## Point-in-time data rules
 
-Every record carries `published_at` (when a decision-maker could have seen it) in
-addition to its event time. Provenance is one of:
+Every record carries `published_at` in addition to event time. Provenance is one of:
 
 `observed` · `published_forecast` · `model_forecast` · `reconstructed` ·
 `synthetic` · `assumed` · `perfect_foresight`
 
-Availability assumptions, stated openly:
+Availability assumptions:
 
-- **Elexon MID** exposes no per-record publish time, so availability is
-  *reconstructed* as `period end + 10 minutes` (configurable). Records are flagged
-  `publication_reconstructed`. Consequence: at the gate for period *t*, the newest
-  usable price is period *t−2*.
-- **Day-ahead demand / wind / solar forecasts** use the real Elexon `publishTime`
-  verbatim where returned.
-- **Synthetic data** follows exactly the same availability rule as live MID so the
-  offline demo exercises the identical code path.
+- **Elexon MID** has no per-record publication timestamp, so replay availability is
+  reconstructed as period end + a configurable lag (10 minutes by default) and flagged
+  `publication_reconstructed`.
+- **Demand / wind / solar forecasts** use real publication timestamps when available.
+- **Synthetic data** follows the same availability discipline as live data.
+- The actual outturn is never silently substituted for an unavailable forecast.
 
-When real point-in-time historical forecast vintages are unavailable, the model
-generates its own (provenance `model_forecast`); the actual outturn is **never**
-silently substituted for a forecast.
+## Point-in-time forecaster
 
-## The point-in-time forecaster
+The transparent baseline uses:
 
-Transparent by design (not state-of-the-art, and honest about it):
+- published price forecast when available;
+- same-SP visible lags / rolling same-SP median;
+- intraday EWMA bias correction from prices published so far;
+- horizon-dependent q10/q50/q90 uncertainty.
 
-- **Baseline** per target SP, in order of preference: published day-ahead forecast →
-  same-SP price on the most recent visible prior day → same-SP median over visible
-  prior days → global median.
-- **Intraday correction**: an exponentially-weighted mean (half-life 4 SPs) of
-  (observed − baseline) over today's already-published SPs, decayed by 0.9 per SP of
-  lead time.
-- **Uncertainty**: same-SP dispersion across visible prior days (floor £3/MWh),
-  widened ~2%/SP of lead time; q10/q90 via a normal approximation.
+Every vintage records issue time, information cutoff, newest publication used, input
+counts, basis, provenance and full target-period rows.
 
-Every vintage records `issued_at`, `information_cutoff`, the newest input
-publication time, and input counts — retrievable per step via
-`GET /api/replay/{id}/forecasts?step=k`.
+## Forecast validation
+
+The validation module compares:
+
+- persistence;
+- same SP yesterday;
+- same SP last week;
+- seven-day same-SP rolling median;
+- weekday/SP climatology;
+- the internal PIT model.
+
+Two framings are kept separate:
+
+1. **one-step-ahead** metrics for the forecast actually used at each rolling gate;
+2. **start-of-day path** metrics for peak/trough timing and ramp behaviour.
+
+Reported metrics include MAE, RMSE, bias, correlation, directional accuracy, ramp MAE,
+peak/trough timing error, pinball losses, q10–q90 coverage, interval width and calibration.
+MAPE is deliberately not a headline metric because prices and solar may be zero or negative.
+
+Each price model may also drive the identical rolling replay, so statistical accuracy is
+shown beside realised strategy P&L.
+
+## Trader metrics and attribution
+
+Completed runs report performance, risk, battery and execution metrics, including:
+
+- realised gross/net P&L, hit rate, average win/loss, payoff ratio and profit factor;
+- maximum drawdown, P&L volatility, historical VaR and Expected Shortfall;
+- charge/discharge throughput, equivalent cycles and time near physical limits;
+- requested/executed/unfilled volume, spread/slippage/fee costs;
+- regret and capture versus perfect foresight;
+- regime-level forecast error and P&L.
+
+The P&L attribution reconciles expected model P&L to realised net P&L using defensible
+price-forecast, volume, execution-cost and residual/interaction effects. The residual is
+shown explicitly rather than inventing false precision.
+
+## Decision alternatives and marginals
+
+For an audited gate the alternatives endpoint performs genuine re-solves for selected,
+forced-charge, forced-discharge and forced-idle cases. It reports immediate value, future
+value, continuation value, total objective, next-best action and value gap.
+
+Marginal values are exposed only where the perturbation is mathematically meaningful,
+with units such as £/MWh, £/MW or £/cycle.
+
+## Execution modes
+
+- **Ideal**: full simulated fill at MID (theoretical reference benchmark).
+- **Simple realistic**: simulated spread, fees, slippage and volume cap.
+- **Stress**: wider costs and lower available volume.
+
+These are assumptions, not reconstructed order-book executions. MID remains a reference
+price, not a bid/ask quote.
+
+## Persistence and versioning
+
+Completed runs are archived in DuckDB with:
+
+- options and battery configuration;
+- strategy, forecast, optimiser and execution version stamps;
+- full decisions and forecast vintages;
+- summaries and cached metrics.
+
+Archived runs survive backend restarts and are served read-only. Re-solves such as decision
+alternatives require a live in-memory session.
 
 ## Leakage audit
 
-`GET /api/replay/{id}/metrics` includes a per-decision audit proving:
+`GET /api/replay/{id}/metrics` proves per decision that:
 
-- `basis_max_published_at <= as_of` (no input postdated the gate), and
-- the settled outturn's availability time postdates the gate (the decision could not
-  have seen its own answer).
+- `basis_max_published_at <= as_of`; and
+- the settled outturn became available only after the gate.
 
-The test suite additionally covers: rejection of future-published records, SoC
-carry-forward, first-action-only execution, per-step reforecasting, DST days with
-46/48/50 periods, live-mode null future actuals, and a hand-verifiable 3-period case.
+Tests cover future-record rejection, first-action-only execution, SoC carry, cross-midnight
+horizons, 46/48/50-SP days, execution fills, continuation value, metric reconciliation and
+live-mode null future actuals.
 
-## Execution assumptions (what is NOT modelled)
+## Scope boundaries
 
-Committed energy is assumed executable at the MID reference price. The following are
-**not** modelled, and results must be read accordingly:
+The credible replay headline is wholesale-only and simulated. It does **not** claim:
 
-- exchange order-book execution, bid/ask spreads, market depth;
-- partial fills or market impact;
-- real reserve procurement, commitment or activation;
+- exchange order-book access or live execution;
+- real reserve procurement, awards or activation;
 - guaranteed BM acceptance;
-- live production trading of any kind.
+- production asset control.
 
-Reserve and BM revenue streams elsewhere in the app are labelled
-**experimental / assumption-based** and are excluded from the rolling strategy's
-headline P&L, which is:
-
-```
-realised wholesale P&L − degradation
-```
-
-Expected future P&L (forecast-based) is always reported separately from realised P&L.
+Reserve and BM values are isolated in the **Reserve & BM Laboratory**, labelled
+experimental/assumed and excluded from credible realised replay P&L.
