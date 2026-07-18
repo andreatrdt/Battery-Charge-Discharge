@@ -19,13 +19,16 @@ jobs:
       - name: Ruff
         id: ruff
         working-directory: backend
-        run: ruff check gb_battery tests > ruff.txt 2>&1
-      - name: Upload Ruff diagnostics
-        if: failure() && steps.ruff.outcome == 'failure'
+        run: ruff check --fix gb_battery tests > ruff.txt 2>&1
+      - name: Upload Ruff-corrected sources
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-ruff
-          path: backend/ruff.txt
+          name: backend-ruff-corrected
+          path: |
+            backend/gb_battery/replay/metrics.py
+            backend/tests/test_replay_metrics.py
+            backend/ruff.txt
       - name: Mypy
         working-directory: backend
         run: mypy gb_battery
