@@ -17,8 +17,15 @@ jobs:
       - name: Install
         run: pip install --quiet -e "backend[dev]"
       - name: Ruff
+        id: ruff
         working-directory: backend
-        run: ruff check gb_battery tests
+        run: ruff check gb_battery tests > ruff.txt 2>&1
+      - name: Upload Ruff diagnostics
+        if: failure() && steps.ruff.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-ruff
+          path: backend/ruff.txt
       - name: Mypy
         working-directory: backend
         run: mypy gb_battery
@@ -43,6 +50,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Lint
-        run: npx next lint --quiet
+        id: lint
+        run: npx next lint --quiet > lint.txt 2>&1
+      - name: Upload lint diagnostics
+        if: failure() && steps.lint.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-lint
+          path: frontend/lint.txt
       - name: Build
         run: npm run build
