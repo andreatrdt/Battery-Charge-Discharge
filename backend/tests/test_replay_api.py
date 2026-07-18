@@ -52,8 +52,16 @@ def test_metrics_include_leakage_audit_and_pf_separation(finished_replay: dict) 
     pf = next(row for row in body["table"] if row["strategy"] == "perfect_foresight")
     assert "not a tradable strategy" in pf["label"]
     main = next(row for row in body["table"] if row["strategy"] == "rolling_forecast")
-    # The rolling strategy must not exceed the perfect-foresight upper bound.
-    assert main["realised_pnl_gbp"] <= pf["realised_pnl_gbp"] + 1e-6
+    # The rolling strategy must not exceed the perfect-foresight upper bound on
+    # the inventory-adjusted basis (ending stored energy marked to the closing
+    # actual price — the exact functional PF optimises, so the bound is strict).
+    assert (
+        main["inventory_adjusted_pnl_gbp"] <= pf["inventory_adjusted_pnl_gbp"] + 1e-6
+    )
+    # New audit blocks are present.
+    assert body["attribution"]["reconciles"] is True
+    assert body["regimes"]["regimes"]
+    assert body["price_heatmap"]["cells"]
 
 
 def test_forecast_vintages_are_retrievable_per_step(finished_replay: dict) -> None:
@@ -61,9 +69,14 @@ def test_forecast_vintages_are_retrievable_per_step(finished_replay: dict) -> No
     r0 = client.get(f"/api/replay/{rid}/forecasts", params={"step": 0})
     r5 = client.get(f"/api/replay/{rid}/forecasts", params={"step": 5})
     assert r0.status_code == r5.status_code == 200
-    assert len(r0.json()["rows"]) == 48
-    assert len(r5.json()["rows"]) == 43
-    assert r0.json()["information_cutoff"] <= r5.json()["information_cutoff"]
+    # The 48 h cross-day horizon is a FIXED length: every vintage covers 96
+    # half-hour periods from its own gate (it does not shrink towards midnight).
+    assert len(r0.json()["rows"]) == 96
+    assert len(r5.json()["rows"]) == 96
+    assert r0.json()["information_cutoff"] < r5.json()["information_cutoff"]
+    # The horizon genuinely crosses midnight: at least two settlement dates.
+    dates = {row["settlement_date"] for row in r0.json()["rows"]}
+    assert len(dates) >= 2
 
 
 def test_inputs_endpoint_exposes_provenance(finished_replay: dict) -> None:
@@ -112,10 +125,12 @@ def test_live_paper_trading_never_reveals_future_actuals() -> None:
             assert d["actual_price"] is None
             assert d["realised_pnl_gbp"] is None
     # The forward proposal is forecast-only: no actual field exists on it.
+    # (Keys are (date, SP): the cross-day horizon legitimately reuses SP numbers
+    # on the following settlement date.)
     if body["forward_proposal"] is not None:
-        executed_sps = {d["settlement_period"] for d in body["decisions"]}
+        executed = {(d["settlement_date"], d["settlement_period"]) for d in body["decisions"]}
         for p in body["forward_proposal"]:
-            assert p["settlement_period"] not in executed_sps
+            assert (p["settlement_date"], p["settlement_period"]) not in executed
             assert "actual_price" not in p
     assert "paper" in body["disclaimer"].lower()
     # Expected (future) and realised (settled past) P&L are reported separately.
