@@ -6,70 +6,29 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - name: Install
         run: pip install --quiet -e "backend[dev]"
-      - name: Apply precise static-check fixes
-        if: github.actor != 'github-actions[bot]'
-        run: |
-          python - <<'PY'
-          import re
-          from pathlib import Path
-
-          validation = Path("backend/gb_battery/replay/validation.py")
-          text = validation.read_text()
-          text = text.replace(
-              "def forecast(self, store, as_of, target_periods):  # type: ignore[override]",
-              "def forecast(self, store, as_of, target_periods):",
-          )
-          text = text.replace("out: dict[str, dict] = {}", "out: dict[str, object] = {}")
-          validation.write_text(text)
-
-          router = Path("backend/gb_battery/api/routers/replay.py")
-          text = router.read_text()
-          text = re.sub(
-              r'''        decisions = \(\n\s*\[d\.model_dump\(mode="json"\) for d in session\.engine\.decisions\] if session else stored\["decisions"\]\n\s*\)''',
-              '''        if session is not None:\n            decisions = [d.model_dump(mode="json") for d in session.engine.decisions]\n        else:\n            assert stored is not None\n            decisions = stored["decisions"] or []''',
-              text,
-          )
-          text = re.sub(
-              r'''        att = \(\n\s*attribution\(session\.engine\.decisions\)\n\s*if session\n\s*else \(stored\.get\("metrics"\) or \{\}\)\.get\("attribution"\)\n\s*\)''',
-              '''        if session is not None:\n            att = attribution(session.engine.decisions)\n        else:\n            assert stored is not None\n            att = (stored.get("metrics") or {}).get("attribution")''',
-              text,
-          )
-          text = text.replace(
-              '    elif what == "attribution":\n        if session is not None:',
-              '    elif what == "attribution":\n        att: dict | None\n        if session is not None:',
-          )
-          router.write_text(text)
-          PY
-          cd backend
-          ruff check --fix gb_battery tests
-      - name: Commit static-check fixes
-        if: github.actor != 'github-actions[bot]'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/gb_battery/replay/validation.py backend/gb_battery/api/routers/replay.py backend/gb_battery/replay/metrics.py backend/tests/test_replay_metrics.py
-          if ! git diff --cached --quiet; then
-            git commit -m "Finish backend typing fixes"
-            git push origin HEAD:${{ github.head_ref }}
-          fi
       - name: Ruff
+        id: ruff
         working-directory: backend
-        run: ruff check gb_battery tests
+        run: ruff check gb_battery tests > ruff.txt 2>&1
+      - name: Upload Ruff diagnostics
+        if: failure() && steps.ruff.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-ruff
+          path: backend/ruff.txt
       - name: Mypy
         id: mypy
         working-directory: backend
@@ -90,6 +49,10 @@ jobs:
         with:
           name: backend-pytest
           path: backend/pytest.txt
+      - name: Show Pytest summary
+        if: success()
+        working-directory: backend
+        run: tail -n 2 pytest.txt
 
   frontend:
     runs-on: ubuntu-latest
@@ -108,6 +71,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Lint
-        run: npx next lint --quiet
+        id: lint
+        run: npx next lint --quiet > lint.txt 2>&1
+      - name: Upload lint diagnostics
+        if: failure() && steps.lint.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-lint
+          path: frontend/lint.txt
       - name: Build
         run: npm run build
