@@ -29,9 +29,18 @@ import numpy as np
 
 from gb_battery.battery.config import BatteryConfig
 from gb_battery.replay.engine import ReplayEngine, ReplayOptions
-from gb_battery.replay.forecaster import PITForecaster, VintageRow
+from gb_battery.replay.forecaster import (
+    SIGMA_CAP,
+    SIGMA_FLOOR,
+    SIGMA_WIDEN_PER_SP,
+    Z10,
+    ForecastVintage,
+    PITForecaster,
+    VintageRow,
+)
 from gb_battery.replay.metrics import price_error_heatmap
 from gb_battery.replay.pit import PITDataStore, _utc
+from gb_battery.replay.records import Provenance
 from gb_battery.settlement import SettlementPeriod, settlement_periods_for_day
 
 PRICE_BENCHMARKS = [
@@ -64,10 +73,14 @@ METRIC_GUIDE = {
 class BenchmarkForecaster(PITForecaster):
     """A PIT forecaster whose point forecast follows a named benchmark rule.
 
-    Reuses the production forecaster's machinery (PIT queries, sigma, quantile
-    shape) but swaps the point. Used both for validation metrics and for
-    downstream strategy-P&L comparisons, so statistical and economic rankings
-    come from the same code path.
+    ``internal_model`` delegates to the production :class:`PITForecaster`. The
+    simple benchmarks compute their point directly from the point-in-time
+    observations (a cheap lookup) with an inexpensive same-SP dispersion for
+    the interval — deliberately *not* routing through the full internal
+    pipeline, so validating six models and replaying several of them stays fast
+    enough for an interactive request. Points are identical to the documented
+    rules; only the uncertainty band is a cheap approximation (benchmarks do
+    not report probabilistic scores).
     """
 
     def __init__(self, method: str) -> None:
@@ -77,10 +90,12 @@ class BenchmarkForecaster(PITForecaster):
         self.method = method
 
     def forecast(self, store, as_of, target_periods):
-        vintage = super().forecast(store, as_of, target_periods)
         if self.method == "internal_model":
-            return vintage
-        obs = store.observations_at(_utc(as_of), "wholesale_price")
+            return super().forecast(store, as_of, target_periods)
+
+        as_of = _utc(as_of)
+        obs = store.observations_at(as_of, "wholesale_price")
+        store.check_no_leakage(obs, as_of)  # PIT guarantee preserved
         by_sp: dict[int, list[tuple[date, float]]] = {}
         for o in obs:
             by_sp.setdefault(o.settlement_period, []).append((o.settlement_date, o.value))
@@ -88,27 +103,45 @@ class BenchmarkForecaster(PITForecaster):
         by_wd_sp: dict[tuple[int, int], list[float]] = {}
         for o in obs:
             by_wd_sp.setdefault((o.settlement_date.weekday(), o.settlement_period), []).append(o.value)
+        global_median = float(np.median([o.value for o in obs])) if obs else 50.0
+        global_sigma = float(np.std([o.value for o in obs])) if len(obs) > 2 else 15.0
 
-        new_rows: list[VintageRow] = []
-        for row, per in zip(vintage.rows, target_periods, strict=True):
+        def sigma_for(sp: int) -> float:
+            vals = [v for _, v in by_sp.get(sp, [])]
+            s = float(np.std(vals)) if len(vals) > 2 else global_sigma
+            return float(min(max(s, SIGMA_FLOOR), SIGMA_CAP))
+
+        rows: list[VintageRow] = []
+        for k, per in enumerate(target_periods):
             point = self._point_for(per, by_sp, last_obs, by_wd_sp)
             if point is None:
-                point = row.point  # fall back to internal when the rule has no data
-            shift = point - row.point
-            new_rows.append(
+                point = global_median
+            widen = min(1.0 + SIGMA_WIDEN_PER_SP * k, 2.0)
+            sigma = sigma_for(per.settlement_period) * widen
+            rows.append(
                 VintageRow(
-                    **{
-                        **row.__dict__,
-                        "point": round(point, 3),
-                        "q50": round(point, 3),
-                        "q10": round(row.q10 + shift, 3),
-                        "q90": round(row.q90 + shift, 3),
-                        "basis": self.method,
-                    }
+                    settlement_date=per.settlement_date,
+                    settlement_period=per.settlement_period,
+                    start_utc=per.start_utc,
+                    point=round(point, 3),
+                    q10=round(point - Z10 * sigma, 3),
+                    q50=round(point, 3),
+                    q90=round(point + Z10 * sigma, 3),
+                    sigma=round(sigma, 3),
+                    basis=self.method,
+                    intraday_bias=0.0,
+                    provenance=Provenance.MODEL_FORECAST,
                 )
             )
-        vintage.rows = new_rows
-        return vintage
+        return ForecastVintage(
+            issued_at=as_of,
+            information_cutoff=as_of,
+            rows=rows,
+            basis_max_published_at=store.max_published_at(obs),
+            n_input_observations=len(obs),
+            n_input_forecasts=0,
+            warnings=[],
+        )
 
     def _point_for(self, per: SettlementPeriod, by_sp, last_obs, by_wd_sp) -> float | None:
         hist = [
@@ -200,8 +233,19 @@ def validate_price_forecasts(
     config: BatteryConfig | None = None,
     with_strategy_pnl: bool = True,
     options: ReplayOptions | None = None,
+    max_strategy_models: int = 3,
+    strategy_horizon_hours: int = 24,
 ) -> dict:
-    """Benchmark every price model statistically AND economically."""
+    """Benchmark every price model statistically AND economically.
+
+    Statistical metrics are cheap and computed for **every** model. Each economic
+    strategy P&L, by contrast, replays a full rolling day per model, so it is
+    bounded for tractability: at most ``max_strategy_models`` (internal model
+    first, then the others in order) are replayed, using a lighter
+    ``strategy_horizon_hours`` horizon and an O(1) fixed continuation value so a
+    browser request returns in seconds rather than minutes. Models beyond the
+    cap report ``strategy_pnl_gbp = None``.
+    """
     models = models or ["persistence", "lag_same_sp_1d", "rolling_median_7d", "internal_model"]
     config = config or BatteryConfig()
     base_options = options or ReplayOptions(source="synthetic")
@@ -217,6 +261,28 @@ def validate_price_forecasts(
     usable = [p for p in periods if (p.settlement_date, p.settlement_period) in actual_by_key]
     if len(usable) < 8:
         return {"error": "Not enough settled periods with outturns to validate against."}
+
+    # Bound the economic replays: internal model first, then others in order.
+    strategy_set: set[str] = set()
+    if with_strategy_pnl:
+        ordered = (["internal_model"] if "internal_model" in models else []) + [
+            m for m in models if m != "internal_model"
+        ]
+        strategy_set = set(ordered[:max_strategy_models])
+    # O(1) fixed continuation value for the validation replays (skips the
+    # per-gate beyond-horizon forecast the production engine runs).
+    median_price = float(np.median(list(actual_by_key.values())))
+    strategy_config = config.model_copy(
+        update={"terminal_soc_value_gbp_per_mwh": config.discharge_efficiency * median_price}
+    )
+    strategy_options = ReplayOptions(
+        **{
+            **base_options.model_dump(),
+            "n_days": n_days,
+            "horizon_hours": strategy_horizon_hours,
+            "terminal_treatment": "config",
+        }
+    )
 
     table = []
     heatmap = None
@@ -260,11 +326,11 @@ def validate_price_forecasts(
 
         strategy_pnl = None
         capture = None
-        if with_strategy_pnl:
+        if method in strategy_set:
             eng = ReplayEngine(
-                config,
+                strategy_config,
                 day,
-                options=ReplayOptions(**{**base_options.model_dump(), "n_days": n_days}),
+                options=strategy_options,
                 store=store,
                 forecaster=fc,
             )
@@ -290,8 +356,12 @@ def validate_price_forecasts(
             "start-of-day MAE use the full-path forecast issued at the first gate. "
             "Strategy P&L runs the identical rolling replay with each model — a "
             "statistically better forecast is not declared better until it also "
-            "earns more."
+            "earns more. For tractability strategy P&L is computed for at most "
+            f"{max_strategy_models} models (internal model first) using a "
+            f"{strategy_horizon_hours} h horizon and a fixed continuation value; "
+            "other models show a blank strategy P&L."
         ),
+        "strategy_pnl_models": sorted(strategy_set),
         "table": table,
         "metric_guide": METRIC_GUIDE,
         "start_of_day_series": sod_series,

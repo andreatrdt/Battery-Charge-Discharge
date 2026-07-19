@@ -42,7 +42,7 @@ export default function ReserveBmLabPage() {
     },
   });
 
-  const periods = (result?.periods || []) as PeriodWithSplit[];
+  const periods = useMemo(() => (result?.periods || []) as PeriodWithSplit[], [result]);
   const selected = periods.find((p) => p.settlement_period === selectedSp) || periods[0] || null;
 
   const rows = useMemo(

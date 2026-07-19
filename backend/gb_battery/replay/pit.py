@@ -39,7 +39,14 @@ class PITViolation(RuntimeError):
 
 
 def _utc(dt: datetime | pd.Timestamp) -> datetime:
-    """Coerce to a tz-aware UTC datetime (naive input is assumed UTC)."""
+    """Coerce to a tz-aware UTC datetime (naive input is assumed UTC).
+
+    Fast path for native ``datetime`` (the common case in the store's hot query
+    loops) avoids constructing a pandas ``Timestamp`` per record, which is the
+    dominant cost when scanning thousands of records per decision gate.
+    """
+    if type(dt) is datetime:  # exact type: pd.Timestamp is a datetime subclass
+        return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
     ts = pd.Timestamp(dt)
     ts = ts.tz_localize(UTC) if ts.tzinfo is None else ts.tz_convert(UTC)
     return ts.to_pydatetime()
