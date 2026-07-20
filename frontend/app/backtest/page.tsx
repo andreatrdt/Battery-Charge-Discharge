@@ -71,18 +71,7 @@ export default function BacktestPage() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Chronological Backtest</h1>
-          <p className="text-xs text-terminal-muted">
-            Forecast-driven decisions settled on outturn prices. Benchmarks vs a perfect-foresight
-            upper bound. Backtested returns are <em>not</em> achievable live.
-          </p>
-          <p className="mt-1 text-[11px] text-terminal-muted">
-            Runs on the global source (<strong>{source}</strong>). The daily backtest needs a
-            day-ahead price forecast <em>and</em> a realised outturn per period, so Elexon is
-            reported as unsupported rather than silently replaced.
-          </p>
-        </div>
+        <h1 className="text-lg font-semibold">Backtest</h1>
         <div className="flex items-center gap-2 text-xs">
           <label className="text-terminal-muted">Days</label>
           <input type="number" min={5} max={35} value={days} onChange={(e) => setDays(parseInt(e.target.value || "21"))} className="w-16 bg-terminal-bg border border-terminal-border rounded px-2 py-1" />
@@ -98,24 +87,17 @@ export default function BacktestPage() {
         <Panel title={`Backtest unavailable for source “${unsupported.requested_source}”`}>
           <div className="space-y-2 text-xs">
             <div className="inline-block rounded bg-kind-estimated/15 px-2 py-0.5 text-[10px] font-bold uppercase text-kind-estimated">
-              Unsupported source — nothing was run, nothing was substituted
+              Source unsupported
             </div>
-            <p className="text-terminal-muted leading-relaxed">{unsupported.reason}</p>
             <p>
-              <span className="text-terminal-muted">Requested source: </span>
+              <span className="text-terminal-muted">Requested: </span>
               {unsupported.requested_source} ·{" "}
-              <span className="text-terminal-muted">Actual source: </span>
-              {unsupported.actual_source ?? "none (no data produced)"} ·{" "}
-              <span className="text-terminal-muted">Network used: </span>
-              {unsupported.network_used ? "yes" : "no"} ·{" "}
-              <span className="text-terminal-muted">Cache used: </span>
-              {unsupported.cache_used ? "yes" : "no"}
-            </p>
-            <p className="text-terminal-muted">
-              Supported here: {unsupported.supported_sources.join(", ")}. Change the Source selector
-              in the header, or use{" "}
-              <a href="/replay" className="underline text-kind-observed">Replay &amp; Live</a> for
-              point-in-time Elexon analysis.
+              <span className="text-terminal-muted">Network: </span>
+              {unsupported.network_used ? "used" : "not used"} ·{" "}
+              <span className="text-terminal-muted">Cache: </span>
+              {unsupported.cache_used ? "used" : "not used"} ·{" "}
+              <span className="text-terminal-muted">Supported: </span>
+              {unsupported.supported_sources.join(", ")}
             </p>
           </div>
         </Panel>

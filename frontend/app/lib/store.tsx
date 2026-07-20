@@ -38,9 +38,6 @@ export interface AppState {
   /** Network policy for the Elexon source only (synthetic/sample never fetch). */
   networkPolicy: NetworkPolicy;
   setNetworkPolicy: (p: NetworkPolicy) => void;
-  /** Learning mode changes explanation density only — never calculations. */
-  learning: boolean;
-  setLearning: (l: boolean) => void;
 }
 
 const Ctx = createContext<AppState | null>(null);
@@ -50,7 +47,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [day, setDay] = useState("2025-01-15");
   const [source, setSource] = useState<SourceName>("synthetic");
   const [networkPolicy, setNetworkPolicy] = useState<NetworkPolicy>("live_with_cache");
-  const [learning, setLearning] = useState(true);
 
   useEffect(() => {
     try {
@@ -61,7 +57,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (s.day) setDay(s.day);
         if (s.source) setSource(s.source);
         if (s.networkPolicy) setNetworkPolicy(s.networkPolicy);
-        if (typeof s.learning === "boolean") setLearning(s.learning);
       }
     } catch {
       /* ignore */
@@ -71,15 +66,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     localStorage.setItem(
       "gbb_state",
-      JSON.stringify({ config, day, source, networkPolicy, learning }),
+      JSON.stringify({ config, day, source, networkPolicy }),
     );
-  }, [config, day, source, networkPolicy, learning]);
+  }, [config, day, source, networkPolicy]);
 
   return (
     <Ctx.Provider
       value={{
         config, setConfig, day, setDay, source, setSource,
-        networkPolicy, setNetworkPolicy, learning, setLearning,
+        networkPolicy, setNetworkPolicy,
       }}
     >
       {children}

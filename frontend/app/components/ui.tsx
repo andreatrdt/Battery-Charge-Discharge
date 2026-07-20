@@ -29,6 +29,66 @@ export function Stat({ label, value, sub, accent }: { label: string; value: stri
   );
 }
 
+/** Compact KPI tile: label, primary value with a unit, and an optional badge/sub. */
+export function Kpi({
+  label,
+  value,
+  unit,
+  sub,
+  accent,
+  badge,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  sub?: React.ReactNode;
+  accent?: string;
+  badge?: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-terminal-border bg-terminal-panel px-3 py-2.5">
+      <div className="text-[10px] uppercase tracking-wide text-terminal-muted">{label}</div>
+      <div className="mt-0.5 flex items-baseline gap-1">
+        <span className="tabular text-lg font-semibold leading-none" style={{ color: accent }}>
+          {value}
+        </span>
+        {unit && <span className="text-[11px] text-terminal-muted">{unit}</span>}
+      </div>
+      {badge && <div className="mt-1">{badge}</div>}
+      {sub && <div className="mt-0.5 text-[11px] tabular text-terminal-muted">{sub}</div>}
+    </div>
+  );
+}
+
+/** Restrained tab bar for advanced/secondary sections. */
+export function Tabs({
+  tabs,
+  active,
+  onChange,
+}: {
+  tabs: string[];
+  active: string;
+  onChange: (t: string) => void;
+}) {
+  return (
+    <div className="flex gap-1 border-b border-terminal-border">
+      {tabs.map((t) => (
+        <button
+          key={t}
+          onClick={() => onChange(t)}
+          className={`-mb-px border-b-2 px-3 py-1.5 text-xs transition-colors ${
+            active === t
+              ? "border-kind-observed text-kind-observed"
+              : "border-transparent text-terminal-muted hover:text-terminal-text"
+          }`}
+        >
+          {t}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function KindBadge({ kind }: { kind: DataKind }) {
   return (
     <span

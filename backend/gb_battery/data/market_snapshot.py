@@ -131,6 +131,20 @@ def _kind_for(statuses: list[SourceStatus], key: str) -> DataKind:
     return DataKind.FORECAST
 
 
+def _synthetic_niv(sp: int, residual_mw: float, *, seed_key: str) -> float:
+    """Deterministic, plausible synthetic Net Imbalance Volume (MWh).
+
+    Driven by residual demand (a tight system tends to be short) plus a small
+    seeded component so it is not a rigid function of any single series. It is
+    generated independently of frequency — the two must never be identical.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(abs(hash(f"{seed_key}:{sp}")) % (2**32))
+    base = (residual_mw - 24000.0) / 26.0
+    return round(float(base + rng.normal(0.0, 60.0)), 1)
+
+
 def _synthetic_frame(day: date) -> pd.DataFrame:
     periods = settlement_periods_for_day(day)
     n = len(periods)
@@ -138,12 +152,17 @@ def _synthetic_frame(day: date) -> pd.DataFrame:
     for p in periods:
         demand, wind, solar = _fundamentals(p.settlement_period, n)
         price = diurnal_price_shape(p.settlement_period, n)
+        residual = demand - wind - solar
         rows.append(
             {
                 "settlement_period": p.settlement_period,
                 "start_utc": p.start_utc,
                 "wholesale_price": price,
-                "system_price": price + (12.0 if demand - wind - solar > 25000 else -8.0),
+                "system_price": price + (12.0 if residual > 25000 else -8.0),
+                "net_imbalance_volume": _synthetic_niv(
+                    p.settlement_period, residual, seed_key=f"synthetic:{day.isoformat()}"
+                ),
+                "system_price_published_at": None,
                 "demand_forecast_mw": demand,
                 "wind_forecast_mw": wind,
                 "solar_forecast_mw": solar,
@@ -155,6 +174,8 @@ def _synthetic_frame(day: date) -> pd.DataFrame:
 MARKET_COLUMNS = [
     "wholesale_price",
     "system_price",
+    "net_imbalance_volume",
+    "system_price_published_at",
     "demand_forecast_mw",
     "wind_forecast_mw",
     "solar_forecast_mw",
@@ -222,10 +243,23 @@ def _sample_snapshot(day: date) -> MarketSnapshot:
             f"substituted the nearest available sample day {actual_day.isoformat()}."
         )
     rows = hist[pd.to_datetime(hist["settlement_date"]).dt.date == actual_day].copy()
-    keep = ["settlement_period", "start_utc", *MARKET_COLUMNS]
     for col in MARKET_COLUMNS:
         if col not in rows.columns:
             rows[col] = pd.NA
+    # Bundled sample carries no NIV; synthesise a deterministic one (labelled
+    # sample) from residual demand so the offline demo can show GB System state.
+    if rows["net_imbalance_volume"].isna().all():
+        rows["net_imbalance_volume"] = [
+            _synthetic_niv(
+                int(r["settlement_period"]),
+                float(r.get("demand_forecast_mw") or 0.0)
+                - float(r.get("wind_forecast_mw") or 0.0)
+                - float(r.get("solar_forecast_mw") or 0.0),
+                seed_key=f"sample:{actual_day.isoformat()}",
+            )
+            for _, r in rows.iterrows()
+        ]
+    keep = ["settlement_period", "start_utc", *MARKET_COLUMNS]
     frame = rows[keep].sort_values("settlement_period").reset_index(drop=True)
     statuses = [
         SourceStatus(name, True, DataKind.SYNTHETIC, "bundled sample")
@@ -308,7 +342,12 @@ def _elexon_snapshot(
         return client.market_index_data(frm, to).rename(columns={"mid_price": "wholesale_price"})
 
     def _sys() -> pd.DataFrame:
-        return client.system_prices(day).rename(columns={"system_sell_price": "system_price"})
+        return client.system_prices(day).rename(
+            columns={
+                "system_sell_price": "system_price",
+                "published_at": "system_price_published_at",
+            }
+        )
 
     def _dem() -> pd.DataFrame:
         d = client.demand_forecast(frm, to).rename(
@@ -320,7 +359,11 @@ def _elexon_snapshot(
         return client.wind_solar_forecast(frm, to).drop_duplicates("settlement_period")
 
     _series("wholesale", "elexon.MID", ["wholesale_price"], DataKind.OBSERVED, _mid)
-    _series("system_price", "elexon.system_prices", ["system_price"], DataKind.OBSERVED, _sys)
+    _series(
+        "system_price", "elexon.system_prices",
+        ["system_price", "net_imbalance_volume", "system_price_published_at"],
+        DataKind.OBSERVED, _sys,
+    )
     _series("demand", "elexon.demand_forecast", ["demand_forecast_mw"], DataKind.FORECAST, _dem)
     _series(
         "wind_solar", "elexon.wind_solar", ["wind_forecast_mw", "solar_forecast_mw"],

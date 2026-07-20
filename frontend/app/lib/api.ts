@@ -140,6 +140,86 @@ export interface MarketSnapshot {
 export type SourceName = "synthetic" | "sample" | "elexon";
 export type NetworkPolicy = "live_with_cache" | "cache_only" | "live_only";
 
+// ------------------------------------------------------------ combined balance
+
+export type SystemDirection = "GB SYSTEM LONG" | "GB SYSTEM SHORT" | "BALANCED";
+export type CommercialDirection = "LONG" | "SHORT" | "BALANCED";
+export type CommercialStatus = "paper" | "real" | "unavailable";
+
+export interface SystemImbalance {
+  settlement_date: string | null;
+  settlement_period: number | null;
+  net_imbalance_volume_mwh: number | null;
+  direction: SystemDirection | null;
+  system_price_gbp_per_mwh: number | null;
+  published_at: string | null;
+  revision_status: string | null;
+  source: string;
+  provenance: string;
+  warnings: string[];
+}
+
+export interface FrequencySummary {
+  latest_frequency_hz: number | null;
+  mean_frequency_hz: number | null;
+  min_frequency_hz: number | null;
+  max_frequency_hz: number | null;
+  deviation_from_50_hz: number | null;
+  seconds_below_49_9: number | null;
+  seconds_above_50_1: number | null;
+  observation_count: number;
+  first_observation_at: string | null;
+  last_observation_at: string | null;
+  published_at: string | null;
+  source: string;
+  provenance: string;
+  warnings: string[];
+}
+
+export interface CommercialPosition {
+  contracted_net_export_mwh: number | null;
+  scheduled_net_export_mwh: number | null;
+  model_recommended_net_export_mwh: number | null;
+  trader_instructed_net_export_mwh: number | null;
+  executed_net_export_mwh: number | null;
+  confirmed_metered_net_export_mwh: number | null;
+  commercial_imbalance_mwh: number | null;
+  direction: CommercialDirection | null;
+  system_price_gbp_per_mwh: number | null;
+  indicative_imbalance_cashflow_gbp: number | null;
+  status: CommercialStatus;
+  calculation_method: string;
+  provenance: string;
+  assumption_flags: string[];
+  unavailable_reason: string | null;
+}
+
+export interface BatteryStateBlock {
+  soc_mwh: number | null;
+  net_power_mw: number | null;
+  confirmed_at: string | null;
+}
+
+export interface BalanceContext {
+  settlement_date: string;
+  settlement_period: number;
+  requested_source: string;
+  actual_source: string;
+  requested_date: string;
+  actual_data_date: string;
+  network_used: boolean;
+  cache_used: boolean;
+  warnings: string[];
+}
+
+export interface BalanceSnapshot {
+  context: BalanceContext;
+  system: SystemImbalance | null;
+  frequency: FrequencySummary | null;
+  commercial: CommercialPosition | null;
+  battery: BatteryStateBlock | null;
+}
+
 /** An API error that preserves the HTTP status and any structured `detail`. */
 export class ApiError extends Error {
   status: number;
@@ -193,6 +273,29 @@ export const api = {
     jsonFetch<MarketSnapshot>(
       `/api/market/snapshot?day=${day}&source=${source}&network_policy=${networkPolicy}`,
     ),
+  balance: (
+    day: string,
+    settlementPeriod: number,
+    source: SourceName = "synthetic",
+    networkPolicy: NetworkPolicy = "live_with_cache",
+    replaySessionId?: string | null,
+  ) => {
+    const q = new URLSearchParams({
+      day,
+      settlement_period: String(settlementPeriod),
+      source,
+      network_policy: networkPolicy,
+    });
+    if (replaySessionId) q.set("replay_session_id", replaySessionId);
+    return jsonFetch<BalanceSnapshot>(`/api/market/balance?${q.toString()}`);
+  },
+  frequencyDay: (day: string, source: SourceName = "synthetic", networkPolicy: NetworkPolicy = "live_with_cache") =>
+    jsonFetch<{
+      source: string;
+      provenance: string;
+      warnings: string[];
+      periods: { settlement_period: number; mean_frequency_hz: number | null; min_frequency_hz: number | null; max_frequency_hz: number | null }[];
+    }>(`/api/market/frequency?day=${day}&source=${source}&network_policy=${networkPolicy}`),
   dataStatus: () => jsonFetch<{ offline: boolean; sources: unknown[] }>("/api/market/status"),
   optimise: (req: OptimiseRequest) =>
     jsonFetch<{ result: OptimisationResult; source: string; snapshot: MarketSnapshot | null }>(
@@ -323,6 +426,7 @@ export interface DecisionRecord {
   trader_instruction?: TraderInstruction | null;
   execution?: ExecutionRecord | null;
   physical_state?: PhysicalStateRecord | null;
+  commercial?: CommercialPosition | null;
   n_input_observations: number;
   n_input_forecasts: number;
   horizon_hours: number;
@@ -403,6 +507,7 @@ export interface ReplayStatus {
   mode: string;
   day: string;
   options: Record<string, unknown>;
+  versions?: Record<string, unknown>;
   n_periods: number;
   step_index: number;
   complete: boolean;

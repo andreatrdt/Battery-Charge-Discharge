@@ -29,6 +29,11 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field
 
 from gb_battery.battery.config import BatteryConfig
+from gb_battery.market.balance import (
+    CommercialPosition,
+    commercial_position,
+    metered_net_export_from_soc,
+)
 from gb_battery.optimiser.deterministic import optimise
 from gb_battery.optimiser.inputs import OptimisationInputs, PeriodInput, RevenueStreams
 from gb_battery.replay.continuation import ContinuationEstimate, estimate_continuation
@@ -98,6 +103,10 @@ class ReplayOptions(BaseModel):
     # Execution realism (Phase 19).
     execution_mode: ExecutionMode = "ideal"
     execution_params: ExecutionParams | None = None
+
+    # Optional user-supplied contracted schedule (net export MWh per period,
+    # keyed "YYYY-MM-DD|SP"). When absent, the session freezes a day-ahead plan.
+    contracted_net_export: dict[str, float] | None = None
 
     @property
     def forward_days_needed(self) -> int:
@@ -207,6 +216,10 @@ class DecisionRecord(BaseModel):
     execution: ExecutionRecord | None = None
     physical_state: PhysicalStateRecord | None = None
 
+    # Paper Commercial Imbalance for this period (confirmed metered net export vs
+    # the frozen contracted net export). Never a settled BSC result.
+    commercial: CommercialPosition | None = None
+
     warnings: list[str] = Field(default_factory=list)
 
     # Legacy alias kept for API compatibility (equals energy_action).
@@ -313,6 +326,11 @@ class ReplayEngine:
         self.soc = float(
             min(max(config.initial_soc_mwh, config.effective_min_soc), config.effective_max_soc)
         )
+        self._initial_soc = self.soc
+        # Immutable contracted schedule (net export MWh per period), frozen lazily
+        # on first use. Recommendations / instructions / executions never touch it.
+        self._contracted: dict[tuple[date, int], float] | None = None
+        self._contracted_provenance: str = "unavailable"
         self.discharged_mwh = 0.0  # cumulative across the whole replay (never resets)
         self.discharged_by_date: dict[date, float] = {}  # daily cycle-budget usage
         self.decisions: list[DecisionRecord] = []
@@ -784,6 +802,10 @@ class ReplayEngine:
         else:
             record_settlement = {"settlement_status": "pending"}
 
+        commercial = self._commercial_for_gate(
+            per, rec, instr, exec_charge, exec_discharge, confirmed_soc, pg.proposed
+        )
+
         record = DecisionRecord(
             step=pg.step,
             settlement_date=per.settlement_date,
@@ -840,6 +862,7 @@ class ReplayEngine:
             trader_instruction=instr,
             execution=pg.execution,
             physical_state=physical_state,
+            commercial=commercial,
             warnings=step_warnings,
             **record_settlement,
         )
@@ -959,6 +982,91 @@ class ReplayEngine:
             # build_model caps discharge at cycles × capacity × frac_day; invert.
             updates["maximum_cycles_per_day"] = max(allowed / (cap * frac_day), 1e-6)
         return self.config.model_copy(update=updates)
+
+    # ------------------------------------------------------- contracted plan
+    def _ensure_contracted(self) -> None:
+        """Freeze the immutable contracted schedule (once) if not already set.
+
+        User-supplied contracted energy takes priority; otherwise a day-ahead
+        plan is frozen from a single optimisation over the whole replay range at
+        the start of the first period. It is never overwritten by later
+        recommendations, instructions or executions.
+        """
+        if self._contracted is not None:
+            return
+        self._contracted = {}
+        if self.options.contracted_net_export:
+            for key, val in self.options.contracted_net_export.items():
+                try:
+                    d_str, sp_str = key.split("|")
+                    self._contracted[(date.fromisoformat(d_str), int(sp_str))] = float(val)
+                except (ValueError, TypeError):
+                    continue
+            self._contracted_provenance = "user_supplied"
+            return
+        try:
+            as_of = self.periods[0].start_utc
+            horizon = list(self.periods)
+            vintage = self.forecaster.forecast(self.store, as_of, horizon)
+            inputs = inputs_from_vintage(vintage, horizon)
+            cont = self._continuation(as_of, horizon, vintage)
+            updates: dict = {
+                "initial_soc_mwh": self._initial_soc,
+                "terminal_soc_value_gbp_per_mwh": cont.gbp_per_mwh,
+            }
+            if self.options.terminal_treatment == "continuation":
+                updates["minimum_terminal_soc_mwh"] = self.config.minimum_soc_mwh
+            cfg = self.config.model_copy(update=updates)
+            result = optimise(cfg, inputs, compute_marginals=False)
+            if result.status == "optimal" and result.periods:
+                for p in result.periods:
+                    net = (p.discharge_mw - p.charge_mw) * p.duration_hours
+                    self._contracted[(p.settlement_date, p.settlement_period)] = round(net, 6)
+                self._contracted_provenance = "paper_day_ahead_plan"
+        except Exception:  # noqa: BLE001 — leave empty -> commercial unavailable
+            self._contracted_provenance = "unavailable"
+
+    def contracted_net_export_for(self, per: SettlementPeriod) -> float | None:
+        """Frozen contracted net export (MWh) for a period, or None."""
+        self._ensure_contracted()
+        assert self._contracted is not None
+        return self._contracted.get((per.settlement_date, per.settlement_period))
+
+    def _commercial_for_gate(
+        self,
+        per: SettlementPeriod,
+        rec: ModelRecommendation,
+        instr: TraderInstruction,
+        exec_charge: float,
+        exec_discharge: float,
+        confirmed_soc: float,
+        proposed: list[ProposedPeriod],
+    ) -> CommercialPosition:
+        """Paper Commercial Imbalance for a resolved gate (metered vs contracted)."""
+        dt = per.duration_hours
+        contracted = self.contracted_net_export_for(per)
+        metered = metered_net_export_from_soc(
+            self.soc, confirmed_soc,
+            self.config.charge_efficiency, self.config.discharge_efficiency,
+        )
+        scheduled = None
+        if proposed:
+            p0 = proposed[0]
+            scheduled = (p0.discharge_mw - p0.charge_mw) * dt
+        flags = (
+            [f"contracted={self._contracted_provenance}"] if contracted is not None else []
+        )
+        return commercial_position(
+            contracted_net_export_mwh=contracted,
+            confirmed_metered_net_export_mwh=metered,
+            scheduled_net_export_mwh=scheduled,
+            model_recommended_net_export_mwh=(rec.discharge_mw - rec.charge_mw) * dt,
+            trader_instructed_net_export_mwh=(instr.discharge_mw - instr.charge_mw) * dt,
+            executed_net_export_mwh=(exec_discharge - exec_charge) * dt,
+            status="paper",
+            provenance="paper_trade",
+            assumption_flags=flags,
+        )
 
     def _apply_physics(
         self, charge_mw: float, discharge_mw: float, dt: float

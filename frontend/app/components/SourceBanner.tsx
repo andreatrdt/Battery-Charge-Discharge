@@ -3,7 +3,7 @@
 /** Provenance banner: what source/day was requested vs actually served. */
 
 import type { SourceProvenance } from "../lib/api";
-import { ProvBadge } from "./learn";
+import { ProvBadge } from "./badges";
 
 export function SourceBanner({
   provenance,

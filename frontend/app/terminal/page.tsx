@@ -1,12 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { useMemo, useState } from "react";
 import { BatteryVisual } from "../components/BatteryVisual";
-import { Learn, ProvBadge } from "../components/learn";
-import { MarketTimeline } from "../components/MarketTimeline";
+import { ProvBadge } from "../components/badges";
 import { SettlementTable } from "../components/SettlementTable";
-import { Disclaimer, ErrorNote, Panel, Spinner, Stat } from "../components/ui";
+import { ErrorNote, Panel, Spinner, Stat } from "../components/ui";
 import { gbp, num, type PeriodResult } from "../lib/api";
 import { useOptimise } from "../lib/hooks";
 import { useAppState } from "../lib/store";
@@ -49,13 +47,7 @@ export default function TerminalPage() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Optimisation Terminal</h1>
-          <p className="text-xs text-terminal-muted">
-            Single-shot planning view. Energy action and flexibility allocation are shown separately;
-            click a row to inspect the physical and economic logic.
-          </p>
-        </div>
+        <h1 className="text-lg font-semibold">Optimisation Terminal</h1>
         <div className="flex items-center gap-2 text-xs">
           <select value={mode} onChange={(e) => setMode(e.target.value)} className="bg-terminal-bg border border-terminal-border rounded px-2 py-1">
             <option value="deterministic">Deterministic (expected value)</option>
@@ -74,36 +66,11 @@ export default function TerminalPage() {
         </div>
       </div>
 
-      <MarketTimeline highlight="intraday" />
-
-      {isHindsight ? (
-        <div className="rounded border border-kind-estimated/50 bg-kind-estimated/15 px-3 py-2 text-xs text-kind-estimated">
-          <strong>Perfect-foresight view — not a tradable strategy.</strong> The Elexon source on a
-          completed day feeds the day&apos;s <em>realised</em> MID prices into a single whole-day
-          optimisation. Use{" "}
-          <Link href="/replay" className="underline">
-            Replay &amp; Live
-          </Link>{" "}
-          for the honest rolling simulation where each decision sees only information published
-          before it.
+      {isHindsight && (
+        <div className="inline-flex rounded border border-kind-estimated/50 bg-kind-estimated/15 px-2 py-1 text-[11px] text-kind-estimated">
+          Perfect foresight — completed-day realised prices
         </div>
-      ) : (
-        <Disclaimer>
-          <strong>Single-shot planning view.</strong> One whole-day optimisation on the currently
-          selected inputs. For decision-by-decision simulation with point-in-time information, use
-          Replay &amp; Live.
-        </Disclaimer>
       )}
-
-      <Disclaimer>
-        <strong>Sign convention and scope.</strong> P&amp;L positive = revenue. Charging at a negative
-        price is revenue. MW is power at the grid connection; MWh is stored energy. Service and BM
-        values are <strong>experimental / assumption-based</strong> and belong in the{" "}
-        <Link href="/lab" className="underline">
-          Reserve &amp; BM Laboratory
-        </Link>
-        . They are excluded from the credible rolling replay headline P&amp;L.
-      </Disclaimer>
 
       {error && <ErrorNote error={error} />}
       {loading && <Spinner label="Solving optimisation…" />}
@@ -202,14 +169,6 @@ function PeriodDetail({
       <p className="mt-3 rounded border border-terminal-border bg-terminal-bg px-3 py-2 text-sm text-terminal-text">
         {p.explanation}
       </p>
-      <Learn title="Why two labels instead of one action?">
-        <p>
-          Charging, discharging and idling describe the energy that actually changes SoC. Up/down
-          flexibility describes how far the battery could move from that operating point. An idle
-          battery can therefore have energy action <strong>IDLE</strong> and flexibility position
-          <strong> BOTH</strong> at the same time.
-        </p>
-      </Learn>
     </Panel>
   );
 }

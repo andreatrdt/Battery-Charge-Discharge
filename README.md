@@ -1,12 +1,48 @@
-# GB Battery Co-Optimisation Terminal
+# GB Battery Trading & Decision-Support Terminal
 
-A full-stack research and learning terminal for understanding how a GB battery trader
-could turn point-in-time market information into charge/discharge decisions, then audit
-those decisions against what actually happened.
+A GB battery trading and operational decision-support terminal. It turns point-in-time
+market information into charge/discharge decisions and audits those decisions against
+what actually happened, with a rigorous separation between the battery's own
+**Commercial Imbalance**, the **GB System Imbalance** (NIV) and the physical
+**System Frequency**.
 
-> **Research only.** This project submits no orders, controls no physical asset and does
-> not contain licensed EPEX order-book data. Elexon MID is used as a public wholesale
-> reference price, not as a guaranteed executable bid or ask. All paper P&L is illustrative.
+> **Research & decision-support only.** This project submits no orders, controls no physical
+> asset and does not contain licensed EPEX order-book data. Elexon MID is used as a public
+> wholesale reference price, not as a guaranteed executable bid or ask. All paper P&L and the
+> paper Commercial Imbalance are illustrative, never final BSC settlement.
+
+## Three balance concepts (never merged)
+
+These three quantities are computed and displayed independently — none is ever inferred from
+another:
+
+| Concept | What it is | Source | Sign convention |
+|---|---|---|---|
+| **Commercial Imbalance** | This portfolio's own imbalance between contracted and physically delivered energy (a private, paper figure) | Replay/trader session (frozen contracted schedule vs confirmed metered delivery) | `> +tol` → `LONG`, `< -tol` → `SHORT`, else `BALANCED` |
+| **GB System Imbalance** | The aggregate GB system position, as Net Imbalance Volume (NIV) | Official Elexon settlement system-prices | `NIV > +tol` → `GB SYSTEM SHORT`, `NIV < -tol` → `GB SYSTEM LONG`, else `BALANCED` |
+| **System Frequency** | The physical grid frequency in Hz | Elexon `/system/frequency`; deterministic for synthetic/sample | deviation from 50 Hz |
+
+### Commercial Imbalance — strict net-export convention
+
+Positive = export/sale, negative = import/purchase (charging). The imbalance is:
+
+```text
+commercial_imbalance_mwh = confirmed_metered_net_export_mwh − contracted_net_export_mwh
+```
+
+Worked examples:
+
+- Sold 20 MWh, delivered 18 → `18 − 20 = −2` → **SHORT 2 MWh**
+- Sold 20 MWh, delivered 23 → `23 − 20 = +3` → **LONG 3 MWh**
+- Bought 20 MWh, consumed 18 → `−18 − (−20) = +2` → **LONG 2 MWh**
+- Bought 20 MWh, consumed 23 → `−23 − (−20) = −3` → **SHORT 3 MWh**
+
+The stages **Contracted → Recommended → Instructed → Executed → Metered** are kept strictly
+separate. The optimiser recommendation never substitutes for contracted energy, and the trader
+instruction never substitutes for confirmed metered delivery. Confirmed metered state (from the
+confirmed state-of-charge change) overrides model-implied state. See
+[`docs/market_methodology.md`](docs/market_methodology.md) for the full definition, when the
+figure is *paper* vs *unavailable*, and the indicative-cashflow limitation.
 
 ## What the project now does
 
@@ -20,8 +56,10 @@ those decisions against what actually happened.
 - Separates requested from executed volume through ideal, simple and stress execution assumptions.
 - Compares rolling decisions with simple forecast/strategy benchmarks and perfect foresight.
 - Persists completed replay sessions to DuckDB with data/model/configuration version stamps.
-- Provides a visual Learning mode, market-process timeline, battery diagram, decision alternatives,
-  trader metrics, P&L attribution, forecast heatmaps and regime analysis.
+- Computes a paper **Commercial Imbalance** per period, surfaces **GB System Imbalance** (NIV)
+  and **System Frequency**, and combines them in a single `GET /api/market/balance` snapshot.
+- Provides trader metrics, P&L attribution, forecast heatmaps and regime analysis behind
+  compact advanced tabs.
 - Keeps reserve/BM economics in a separate **experimental laboratory**, outside credible
   wholesale replay P&L.
 
@@ -57,22 +95,27 @@ Settle once the outturn is published
 Carry SoC / cycles / P&L forward and repeat
 ```
 
-## Pages
+## Navigation
 
-- **Market** — observed/forecast fundamentals, MID and imbalance settlement price.
-- **Battery** — power, energy, efficiency, grid and degradation configuration.
-- **Terminal** — single-shot deterministic/stochastic/robust optimisation, clearly labelled.
-- **Replay & Live** — cross-day point-in-time historical replay, **trader-in-the-loop**
-  manual mode (model recommendation → trader instruction → simulated execution →
-  confirmed physical state → next optimisation), and live paper trading.
-- **Forecast Validation** — benchmark forecasts, probabilistic calibration, heatmaps and
-  downstream strategy P&L.
-- **Schedule** — single-shot planned schedule; not the rolling replay result.
-- **Scenario Lab** — deterministic and stochastic stress exploration.
-- **Backtest** — legacy multi-day strategy comparison.
-- **Reserve & BM Lab** — experimental physical capability and assumed service economics.
-- **Data & Audit** — exact decision inputs, provenance, exports and persistent replay archive.
-- **Methodology** — market structure, equations, metrics and limitations.
+Four primary pages, with secondary tools behind a compact **Tools** menu.
+
+Primary:
+
+- **Market** (`/`) — the combined balance view: GB System Imbalance (NIV), System Frequency,
+  System Price and the portfolio's paper Commercial Imbalance for the selected Settlement Period.
+- **Trading** (`/replay`) — the **trader-in-the-loop** workflow (model recommendation → trader
+  instruction → simulated execution → confirmed physical state → next optimisation), in manual or
+  automatic mode, with the full commercial-imbalance ladder per decision.
+- **Validation** (`/validation`) — benchmark forecasts, probabilistic calibration and downstream
+  strategy P&L.
+- **Audit** (`/data`) — decision inputs, trader decision history, replay archive, source provenance
+  and version stamps.
+
+Tools: **Battery Configuration**, **Terminal**, **Schedule**, **Scenario Lab**, **Backtest**,
+**Reserve & BM Lab**.
+
+The operational frontend contains no tutorial, learning-mode or conceptual-explanation content;
+conceptual documentation lives here and under `docs/`.
 
 ## Battery model
 
@@ -196,18 +239,20 @@ Key directories:
 backend/gb_battery/
   api/          FastAPI application and routers
   battery/      asset configuration
-  data/         Elexon/NESO adapters, cache and provenance
+  data/         Elexon/NESO adapters, frequency, cache and provenance
+  market/       balance models: commercial position, GB system imbalance, frequency
   forecast/     chronological forecasting utilities
   optimiser/    Pyomo/HiGHS model and result extraction
   replay/       PIT store, forecasts, cross-day engine, execution, metrics,
-                alternatives, continuation value and persistence
+                contracted schedule, alternatives, continuation value and persistence
   scenario/     stochastic and robust research tools
   backtest/     legacy daily backtest
 frontend/app/
-  replay/       rolling replay and live paper UI
+  page.tsx      Market — combined balance view
+  replay/       Trading — trader-in-the-loop workflow
   validation/   forecast validation dashboard
-  lab/          reserve/BM laboratory
-  components/   charts, battery visual, learning components and timeline
+  data/         Audit — inputs, decisions, runs, sources, versions
+  components/   charts, battery visual, operational badges
 ```
 
 ## Run locally
@@ -236,7 +281,7 @@ npm ci
 npm run dev
 ```
 
-Open `http://localhost:3000/replay`.
+Open `http://localhost:3000/`.
 
 ### Docker
 
@@ -273,6 +318,15 @@ CI runs the same backend static checks/test suite and frontend typecheck/lint/pr
   non-delivery penalties are not yet faithfully replayed.
 - No live market orders, asset telemetry integration or operational controls.
 - Perfect foresight is an unattainable benchmark, never a strategy.
+- The **Commercial Imbalance** is a *paper* figure: the contracted position is a frozen day-ahead
+  plan (or a user-supplied schedule), and delivery is the simulated confirmed metering. It is never
+  a final BSC settlement result. Public Elexon data cannot know a portfolio's private contracts or
+  metering, so on the Elexon/market-only view the Commercial Position is reported as unavailable.
+- The **Indicative Imbalance Cashflow** (`commercial_imbalance_mwh × system_price`) ignores dual
+  imbalance pricing, accepted balancing actions and BSC settlement detail.
+- **System Frequency** for `elexon` uses live Elexon data; for `synthetic`/`sample` it is a
+  deterministic, plausible generated series (not derived from NIV) and is labelled as such.
 
-See [`docs/replay_methodology.md`](docs/replay_methodology.md),
-[`docs/limitations.md`](docs/limitations.md) and the in-app Methodology page for details.
+See [`docs/market_methodology.md`](docs/market_methodology.md),
+[`docs/replay_methodology.md`](docs/replay_methodology.md) and
+[`docs/limitations.md`](docs/limitations.md) for details.

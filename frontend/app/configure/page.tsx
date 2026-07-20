@@ -2,7 +2,7 @@
 
 import { useAppState, DEFAULT_CONFIG } from "../lib/store";
 import type { BatteryConfig } from "../lib/api";
-import { Disclaimer, Field, Panel } from "../components/ui";
+import { Field, Panel } from "../components/ui";
 
 export default function ConfigurePage() {
   const { config, setConfig } = useAppState();
@@ -12,21 +12,13 @@ export default function ConfigurePage() {
 
   return (
     <div className="space-y-4">
-      <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-lg font-semibold">Battery Configuration</h1>
-        <p className="text-xs text-terminal-muted">
-          Defaults describe a generic 50 MW / 100 MWh (2-hour) grid-scale battery — these are
-          <em> assumptions</em>, not observed parameters for any real asset.
-        </p>
+        <div className="flex gap-4 text-xs tabular text-terminal-muted">
+          <span>Round-trip {rte}%</span>
+          <span>Usable {config.minimum_soc_mwh}–{config.maximum_soc_mwh} MWh</span>
+        </div>
       </div>
-
-      <Disclaimer>
-        Round-trip efficiency: <strong>{rte}%</strong>. Usable band:{" "}
-        <strong>
-          {config.minimum_soc_mwh}–{config.maximum_soc_mwh} MWh
-        </strong>
-        . All economics are indicative.
-      </Disclaimer>
 
       <div className="grid md:grid-cols-3 gap-4">
         <Panel title="Energy ratings (MWh)">
@@ -85,10 +77,6 @@ export default function ConfigurePage() {
             <Field label="Upward duration" value={config.upward_service_duration_h} onChange={set("upward_service_duration_h")} step={0.5} />
             <Field label="Downward duration" value={config.downward_service_duration_h} onChange={set("downward_service_duration_h")} step={0.5} />
           </div>
-          <p className="text-[10px] text-terminal-muted mt-2">
-            Conservative energy-headroom rule: reservable MW is capped by stored energy (up) or empty
-            space (down) over the required duration.
-          </p>
         </Panel>
 
         <Panel title="Reset">

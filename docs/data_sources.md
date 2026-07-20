@@ -70,3 +70,18 @@ explicitly. Backtests never use a value whose `published_at` is later than the d
 - **Elexon Insights / BMRS** — open data; attribute Elexon and comply with Elexon terms.
 - **NESO** — dataset-specific open licences (NESO Open Licence / CC-BY); attribute NESO.
 - **EPEX SPOT** — licensed; order-book data must not be published or committed. None is included.
+
+## System frequency (Elexon `/system/frequency`)
+
+High-resolution GB system frequency (~15 s samples). Fields used: `measurementTime` (or
+`startTime`), `frequency`, optional `publishTime`. Timestamps are normalised to UTC. Raw samples are
+cached and aggregated to the selected Settlement Period (`gb_battery/data/frequency.py`) before being
+sent to the frontend; the raw sub-minute series is never shipped whole. `synthetic`/`sample` sources
+never call this endpoint — they generate a deterministic, plausible frequency series instead.
+
+## Net Imbalance Volume (NIV)
+
+Surfaced from the existing Elexon settlement system-prices dataset (`netImbalanceVolume`), alongside
+the single system price and `createdDateTime` publication time. Drives the GB System Imbalance
+direction (`NIV > 0 → GB SYSTEM SHORT`, `NIV < 0 → GB SYSTEM LONG`). `synthetic`/`sample` generate a
+deterministic NIV from residual demand (offline, labelled).

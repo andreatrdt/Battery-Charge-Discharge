@@ -3,9 +3,8 @@
 import { useMemo, useState } from "react";
 import { BatteryVisual } from "../components/BatteryVisual";
 import { MultiSeriesChart } from "../components/charts";
-import { Learn, ProvBadge } from "../components/learn";
-import { MarketTimeline } from "../components/MarketTimeline";
-import { Disclaimer, ErrorNote, Panel, Spinner, Stat } from "../components/ui";
+import { ProvBadge } from "../components/badges";
+import { ErrorNote, Panel, Spinner, Stat } from "../components/ui";
 import { gbp, num, type PeriodResult } from "../lib/api";
 import { useOptimise } from "../lib/hooks";
 import { useAppState } from "../lib/store";
@@ -65,52 +64,20 @@ export default function ReserveBmLabPage() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Reserve &amp; BM Laboratory</h1>
-          <p className="text-xs text-terminal-muted">
-            A deliberately separate, assumption-based research area for physical flexibility,
-            availability value and expected BM activation. None of these figures enter the credible
-            wholesale replay headline P&amp;L.
-          </p>
-        </div>
+        <h1 className="text-lg font-semibold">Reserve &amp; BM Laboratory</h1>
         <button
           onClick={run}
           className="rounded border border-kind-observed/40 px-3 py-1 text-xs text-kind-observed hover:bg-kind-observed/10"
         >
-          Re-run laboratory optimisation
+          Re-run
         </button>
       </div>
 
-      <MarketTimeline highlight="bm" />
-
-      <Disclaimer>
-        <strong>Experimental / assumed.</strong> The current model estimates capability and applies
-        assumed availability and expected activation economics. It does not prove that capacity was
-        offered, procured, accepted or activated by NESO. There is no product-specific auction,
-        stacking, non-delivery or penalty model yet.
-      </Disclaimer>
-
       <div className="grid gap-3 md:grid-cols-4">
-        <StageCard
-          title="1. Physical capability"
-          badge="experimental"
-          text="How far the battery could move net export up or down from its planned operating point, subject to power, SoC and duration limits."
-        />
-        <StageCard
-          title="2. Capacity offered"
-          badge="assumed"
-          text="The optimiser treats selected capability as if it can be offered. A real trader would face product rules and tender deadlines."
-        />
-        <StageCard
-          title="3. Capacity accepted"
-          badge="experimental"
-          text="Not modelled as an actual award. The availability P&L is a scenario assumption, not an observed contract."
-        />
-        <StageCard
-          title="4. Activation"
-          badge="experimental"
-          text="Expected activation value is included statistically, but no real BOALF instruction or physical activation path is being replayed."
-        />
+        <StageCard title="Capability" badge="experimental" status="Estimated" />
+        <StageCard title="Offered" badge="assumed" status="Not offered" />
+        <StageCard title="Accepted" badge="experimental" status="Not accepted" />
+        <StageCard title="Activated" badge="experimental" status="Not activated" />
       </div>
 
       {error && <ErrorNote error={error} />}
@@ -142,9 +109,6 @@ export default function ReserveBmLabPage() {
                   { key: "discharge", name: "Discharge", color: "#ef4444", type: "bar" },
                 ]}
               />
-              <p className="mt-1 text-[10px] text-terminal-muted">
-                These bars are the planned physical energy action. They change SoC.
-              </p>
             </Panel>
 
             <Panel title="Flexibility allocation — up (+) / down (−) capability (MW)">
@@ -157,10 +121,6 @@ export default function ReserveBmLabPage() {
                   { key: "down", name: "Downward capability", color: "#0ea5e9", type: "bar" },
                 ]}
               />
-              <p className="mt-1 text-[10px] text-terminal-muted">
-                Capability is not energy already delivered. Down is plotted below zero only as a
-                visual direction convention; it is not negative revenue.
-              </p>
             </Panel>
           </div>
 
@@ -226,20 +186,6 @@ export default function ReserveBmLabPage() {
                   <p className="rounded border border-terminal-border bg-terminal-bg px-3 py-2 leading-relaxed">
                     {selected.explanation}
                   </p>
-                  <Learn title="What would have to happen in the real market?">
-                    <ol className="list-decimal space-y-1 pl-5">
-                      <li>The battery qualifies for a named reserve product.</li>
-                      <li>The trader submits capacity before that product&apos;s tender deadline.</li>
-                      <li>NESO accepts some or all of the offered MW.</li>
-                      <li>The battery remains available and is paid under the awarded contract.</li>
-                      <li>If activated, an instruction changes physical charge/discharge and therefore SoC.</li>
-                      <li>Non-delivery, stacking and restoration rules affect the realised economics.</li>
-                    </ol>
-                    <p className="mt-2">
-                      The current laboratory covers mainly step 1 as a physical estimate and then
-                      applies assumed economics. Steps 2–6 are not yet faithfully reproduced.
-                    </p>
-                  </Learn>
                 </div>
               </div>
             )}
@@ -250,14 +196,14 @@ export default function ReserveBmLabPage() {
   );
 }
 
-function StageCard({ title, badge, text }: { title: string; badge: string; text: string }) {
+function StageCard({ title, badge, status }: { title: string; badge: string; status: string }) {
   return (
     <div className="rounded-lg border border-terminal-border bg-terminal-panel p-3 text-xs">
       <div className="mb-2 flex items-center justify-between gap-2">
         <strong>{title}</strong>
         <ProvBadge p={badge} />
       </div>
-      <p className="text-terminal-muted leading-relaxed">{text}</p>
+      <div className="tabular text-sm text-terminal-text">{status}</div>
     </div>
   );
 }

@@ -35,7 +35,7 @@ npm run dev   # http://localhost:3000 (proxies /api/* to :8000)
 ## Offline mode
 
 Everything needed for a demo works without network access: choose the
-**Bundled sample** or **Synthetic** source in the UI (Replay & Live page), or set
+**Bundled sample** or **Synthetic** source in the UI (Trading page), or set
 `GBB_OFFLINE=1` for the market-snapshot endpoints. The Elexon source requires
 outbound HTTPS to `data.elexon.co.uk`.
 

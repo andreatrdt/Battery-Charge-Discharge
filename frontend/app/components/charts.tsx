@@ -96,7 +96,7 @@ export function MultiSeriesChart({
         {series.map((s) => {
           const yAxisId = s.yAxis || "left";
           if (s.type === "bar")
-            return <Bar key={s.key} yAxisId={yAxisId} dataKey={s.key} name={s.name} fill={s.color} />;
+            return <Bar key={s.key} yAxisId={yAxisId} dataKey={s.key} name={s.name} fill={s.color} isAnimationActive={false} />;
           if (s.type === "area")
             return (
               <Area
@@ -107,6 +107,7 @@ export function MultiSeriesChart({
                 name={s.name}
                 stroke={s.color}
                 fill={`${s.color}33`}
+                isAnimationActive={false}
               />
             );
           return (
@@ -120,6 +121,7 @@ export function MultiSeriesChart({
               strokeWidth={1.6}
               strokeDasharray={s.dashed ? "4 3" : undefined}
               dot={false}
+              isAnimationActive={false}
             />
           );
         })}

@@ -6,7 +6,6 @@
  * arrows are dashed because they are physical estimates, not contracts.
  */
 
-import { Learn } from "./learn";
 import { num } from "../lib/api";
 
 export function BatteryVisual({
@@ -89,25 +88,6 @@ export function BatteryVisual({
         <span><span className="text-terminal-muted">Discharge power: </span>{num(dischargeMw, 1)} / {num(maxDischargeMw, 0)} MW</span>
       </div>
       <div className="text-[11px] text-terminal-muted">Duration: {durationLabel}</div>
-
-      <Learn title="MW vs MWh — power vs energy">
-        <p>
-          <strong>MW is a flow rate</strong> (how fast energy moves right now);{" "}
-          <strong>MWh is an amount</strong> (how much is in the tank). They relate through time:
-        </p>
-        <p className="my-1 rounded bg-terminal-bg px-2 py-1 font-mono text-[11px]">
-          Energy (MWh) = Power (MW) × Time (h) &nbsp;&nbsp;→&nbsp;&nbsp; 50 MW for 30 minutes = 25 MWh
-        </p>
-        <p className="my-1 rounded bg-terminal-bg px-2 py-1 font-mono text-[11px]">
-          Duration (h) = Stored energy (MWh) ÷ Power (MW)
-        </p>
-        <p>
-          The <em>power limits</em> ({num(maxChargeMw, 0)} MW) cap how fast this battery can move
-          energy; the <em>energy capacity</em> ({num(capacityMwh, 0)} MWh) caps how much it can
-          hold. The dashed arrows are <em>physical capability estimates</em> — what the battery
-          could additionally do for one hour — not reserve contracts.
-        </p>
-      </Learn>
     </div>
   );
 }

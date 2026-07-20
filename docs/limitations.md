@@ -57,7 +57,7 @@ reference price, not an executable bid/ask.
 - BM acceptance modelling is exploratory; pairId↔BOALF attribution from public
   schemas is approximate.
 - Consequently, reserve/BM revenue is **experimental / assumption-based** and is
-  excluded from the credible rolling-strategy P&L in Replay & Live.
+  excluded from the credible rolling-strategy P&L in Trading.
 
 ## Forecasting
 
@@ -101,3 +101,18 @@ default, internal model first) and runs over the selected day range with a
 cross-day horizon the product uses. Models outside the cap are shown as
 "not computed". It is a performance-bounded indicator, not a complete economic
 comparison, and the UI says so.
+
+## Commercial Imbalance, GB System Imbalance and frequency
+
+- The **Commercial Imbalance** is a *paper* figure. The contracted position is a frozen day-ahead
+  plan (or a user-supplied schedule), not a real traded book; delivery is the simulated confirmed
+  metering. It is never a final BSC settlement result. On the Elexon/market-only view the Commercial
+  Position is reported as *unavailable* because public data cannot know a portfolio's private
+  contracts or metering — no position is fabricated.
+- The **Indicative Imbalance Cashflow** is `commercial_imbalance_mwh × system_price` only. It ignores
+  dual imbalance pricing, accepted balancing actions, and the full BSC settlement calculation.
+- **GB System Imbalance** uses the official Elexon NIV where available; revision status is surfaced
+  when supplied but historical revisions are not reconciled.
+- **System Frequency** for `elexon` is real Elexon data; for `synthetic`/`sample` it is a
+  deterministic generated series (not derived from NIV) clearly labelled as such. An Elexon failure
+  yields an explicit *frequency unavailable* state, never a silent synthetic fallback.

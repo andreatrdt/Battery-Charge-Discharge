@@ -1,9 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { MultiSeriesChart } from "../components/charts";
-import { MarketTimeline } from "../components/MarketTimeline";
-import { Disclaimer, ErrorNote, Panel, Spinner } from "../components/ui";
+import { ErrorNote, Panel, Spinner } from "../components/ui";
 import { useOptimise } from "../lib/hooks";
 
 export default function SchedulePage() {
@@ -36,26 +34,7 @@ export default function SchedulePage() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-lg font-semibold">Schedule Visualisation</h1>
-        <p className="text-xs text-terminal-muted">
-          Single-shot planned schedule aligned by Settlement Period. Charge is shown positive,
-          discharge negative. This page is not the rolling replay result.
-        </p>
-      </div>
-
-      <MarketTimeline highlight="intraday" />
-
-      <Disclaimer>
-        <strong>Do not compare this directly with completed Replay.</strong> This page visualises one
-        whole-horizon plan from the Terminal. Replay repeatedly reforecasts and executes only one
-        period at a time. The flexibility chart and service/BM P&amp;L are experimental; inspect them
-        separately in the{" "}
-        <Link href="/lab" className="underline">
-          Reserve &amp; BM Laboratory
-        </Link>
-        .
-      </Disclaimer>
+      <h1 className="text-lg font-semibold">Schedule</h1>
 
       {error && <ErrorNote error={error} />}
       {loading && <Spinner label="Solving optimisation…" />}
@@ -85,16 +64,13 @@ export default function SchedulePage() {
                 { key: "discharge", name: "Discharge", color: "#ef4444", type: "bar" },
               ]}
             />
-            <p className="mt-1 text-[10px] text-terminal-muted">
-              These bars change stored energy. Power is MW; one 50 MW half-hour action exchanges 25 MWh before efficiency.
-            </p>
           </Panel>
 
           <Panel title="State of charge — stored energy (MWh)">
             <MultiSeriesChart data={rows} leftLabel="MWh" series={[{ key: "soc", name: "SoC", color: "#38bdf8", type: "area" }]} />
           </Panel>
 
-          <Panel title="Experimental flexibility allocation — up (+) / down (−) (MW)">
+          <Panel title="Flexibility allocation — up (+) / down (−) capability (MW)">
             <MultiSeriesChart
               data={rows}
               zeroLine
@@ -104,12 +80,9 @@ export default function SchedulePage() {
                 { key: "down", name: "Downward capability", color: "#0ea5e9", type: "bar" },
               ]}
             />
-            <p className="mt-1 text-[10px] text-terminal-muted">
-              Downward capability is drawn below zero only to distinguish direction. These values do not prove a real reserve award or activation.
-            </p>
           </Panel>
 
-          <Panel title="P&L comparison — credible wholesale vs assumption-based total">
+          <Panel title="P&L — wholesale vs total model value (£)">
             <MultiSeriesChart
               data={rows}
               zeroLine
@@ -117,9 +90,9 @@ export default function SchedulePage() {
               rightLabel="£ cumulative"
               series={[
                 { key: "wholesalePnl", name: "Wholesale period P&L", color: "#38bdf8", type: "bar", yAxis: "left" },
-                { key: "servicePnl", name: "Service/BM assumed value", color: "#f472b6", type: "bar", yAxis: "left" },
+                { key: "servicePnl", name: "Service/BM (assumed)", color: "#f472b6", type: "bar", yAxis: "left" },
                 { key: "cumWholesale", name: "Cumulative wholesale", color: "#22c55e", yAxis: "right" },
-                { key: "cumTotal", name: "Cumulative total model value", color: "#fbbf24", yAxis: "right", dashed: true },
+                { key: "cumTotal", name: "Cumulative total", color: "#fbbf24", yAxis: "right", dashed: true },
               ]}
             />
           </Panel>

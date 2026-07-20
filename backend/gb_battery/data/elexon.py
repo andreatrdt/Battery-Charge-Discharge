@@ -29,6 +29,7 @@ EP_WIND_SOLAR = "/forecast/generation/wind-and-solar/day-ahead"
 EP_FUELINST = "/datasets/FUELINST"
 EP_BOD = "/datasets/BOD"
 EP_BOALF = "/datasets/BOALF"
+EP_FREQUENCY = "/system/frequency"
 
 SOURCE = "elexon"
 
@@ -174,6 +175,29 @@ class ElexonClient:
             elif "wind" in psr:
                 rec["wind_forecast_mw"] += q
         return self._lineage(pd.DataFrame(list(recs.values())), ts, "wind_solar_forecast")
+
+    def system_frequency(self, frm: datetime, to: datetime) -> pd.DataFrame:
+        """GB system frequency observations (Hz) over ``[frm, to]``.
+
+        Elexon Insights ``/system/frequency`` returns high-resolution frequency
+        samples (roughly every 15 seconds) with a ``measurementTime`` and a
+        ``frequency`` field. Timestamps are normalised to UTC. This is the
+        physical grid frequency — separate from Net Imbalance Volume and from the
+        battery's commercial position.
+        """
+        data, ts = self._get(EP_FREQUENCY, {"from": _iso(frm), "to": _iso(to)})
+        rows = [
+            {
+                "measurement_time": _parse_dt(
+                    r.get("measurementTime") or r.get("startTime") or r.get("dateTime")
+                ),
+                "frequency_hz": _f(r.get("frequency")),
+                "published_at": _parse_dt(r.get("publishTime")),
+                "event_at": _parse_dt(r.get("measurementTime") or r.get("startTime")),
+            }
+            for r in data
+        ]
+        return self._lineage(pd.DataFrame(rows), ts, "frequency")
 
     def generation_by_fuel(self, frm: datetime, to: datetime) -> pd.DataFrame:
         """Half-hourly generation mix (MW by fuel type) aggregated from FUELINST."""
