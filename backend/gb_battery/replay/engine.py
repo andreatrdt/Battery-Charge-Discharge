@@ -21,6 +21,8 @@ executable bid or ask.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
@@ -30,6 +32,14 @@ from gb_battery.battery.config import BatteryConfig
 from gb_battery.optimiser.deterministic import optimise
 from gb_battery.optimiser.inputs import OptimisationInputs, PeriodInput, RevenueStreams
 from gb_battery.replay.continuation import ContinuationEstimate, estimate_continuation
+from gb_battery.replay.decision_state import (
+    ExecutionRecord,
+    ModelRecommendation,
+    PhysicalStateRecord,
+    SessionState,
+    TraderInstruction,
+    TraderLoopError,
+)
 from gb_battery.replay.execution import (
     ExecutionMode,
     ExecutionParams,
@@ -190,6 +200,13 @@ class DecisionRecord(BaseModel):
     degradation_cost_gbp: float = 0.0
     forecast_error: float | None = None  # forecast − actual
 
+    # Decision hierarchy: model recommendation → trader instruction → market
+    # execution → confirmed physical state. Each is immutable once committed.
+    recommendation: ModelRecommendation | None = None
+    trader_instruction: TraderInstruction | None = None
+    execution: ExecutionRecord | None = None
+    physical_state: PhysicalStateRecord | None = None
+
     warnings: list[str] = Field(default_factory=list)
 
     # Legacy alias kept for API compatibility (equals energy_action).
@@ -197,6 +214,34 @@ class DecisionRecord(BaseModel):
     @property
     def action(self) -> str:
         return self.energy_action
+
+
+@dataclass
+class _PendingGate:
+    """Mutable workspace for one in-progress gate (the manual state machine).
+
+    Holds everything computed at ``recommend`` time so the later stages can
+    settle and commit without recomputing. It is never exposed; the committed
+    :class:`DecisionRecord` and its four sub-records are the immutable output.
+    """
+
+    step: int
+    period: SettlementPeriod
+    as_of: datetime
+    now: datetime | None
+    horizon: list[SettlementPeriod]
+    vintage: ForecastVintage
+    cont: ContinuationEstimate
+    recommendation: ModelRecommendation
+    proposed: list[ProposedPeriod]
+    expected_horizon: float
+    objective: float | None
+    planned_terminal_soc: float
+    warnings: list[str]
+    instruction: TraderInstruction | None = None
+    execution: ExecutionRecord | None = None
+    executed_soc_after: float = 0.0
+    extra: dict = field(default_factory=dict)
 
 
 def inputs_from_vintage(
@@ -274,6 +319,19 @@ class ReplayEngine:
         self.vintages: list[ForecastVintage] = []
         self.warnings: list[str] = list(self.store.notes)
         self.versions = version_stamp()
+        # Manual trader-in-the-loop state machine. Automatic step()/run() compose
+        # the same stages and always return here to READY_FOR_RECOMMENDATION.
+        self.state: SessionState = SessionState.READY_FOR_RECOMMENDATION
+        self._pending: _PendingGate | None = None
+        # Append-only audit hook: called after every state transition with
+        # (transition_name, step, replayable_inputs). Set by the session layer to
+        # persist the trail; ``None`` during recovery so replaying does not
+        # duplicate history.
+        self.on_transition: Callable[[str, int, dict], None] | None = None
+
+    def _log_transition(self, transition: str, data: dict) -> None:
+        if self.on_transition is not None:
+            self.on_transition(transition, self.step_index, data)
 
     # ------------------------------------------------------------------ store
     def _build_store(self) -> PITDataStore:
@@ -323,18 +381,27 @@ class ReplayEngine:
             self.periods[t].start_utc, self.options.horizon_hours * 2
         )
 
-    # ------------------------------------------------------------------- step
-    def step(self, now: datetime | None = None) -> DecisionRecord | None:
-        """Execute the next Settlement Period; return its decision record."""
+    # ------------------------------------------------------- staged decision
+    def recommend(self, now: datetime | None = None) -> ModelRecommendation | None:
+        """Stage 1 — produce the optimiser's advisory recommendation.
+
+        Advances no state and executes nothing. Returns ``None`` when the replay
+        is complete. Requires the state machine to be ready for a new gate.
+        """
         if self.options.live and now is None:
-            now = datetime.now(tz=UTC)  # live settlement must never see past "now"
+            now = datetime.now(tz=UTC)
+        if self.state not in (SessionState.READY_FOR_RECOMMENDATION, SessionState.COMPLETE):
+            raise TraderLoopError(
+                f"Cannot recommend from state {self.state}; resolve the current period first."
+            )
         if self.is_complete(now):
+            self.state = SessionState.COMPLETE
             return None
+
         t = self.step_index
         per = self.periods[t]
-        as_of = per.start_utc  # decision gate = period start
+        as_of = per.start_utc
         horizon = self._horizon(t)
-
         vintage = self.forecaster.forecast(self.store, as_of, horizon)
         inputs = inputs_from_vintage(vintage, horizon)
         cont = self._continuation(as_of, horizon, vintage)
@@ -349,7 +416,7 @@ class ReplayEngine:
             req_charge, req_discharge = _threshold_first_action(cfg, inputs, self.soc)
             proposed: list[ProposedPeriod] = []
             expected_horizon = 0.0
-            objective = None
+            objective: float | None = None
             explanation = (
                 "Threshold rule: charge below the 30th, discharge above the 70th "
                 "percentile of the forecast horizon prices."
@@ -388,66 +455,319 @@ class ReplayEngine:
                     for p in result.periods
                 ]
 
-        # --- Execution model: requested → executed (Phase 19) ----------------
+        row = vintage.rows[0]
         dt = per.duration_hours
-        exec_params = params_for(self.options.execution_mode, self.options.execution_params)
-        cap = exec_params.max_executable_mw
-        fill = exec_params.fill_ratio
-        exec_charge = (min(req_charge, cap) if cap is not None else req_charge) * fill
-        exec_discharge = (min(req_discharge, cap) if cap is not None else req_discharge) * fill
-        # Hard daily cycle budget at execution: the horizon model's aggregate
-        # constraint could otherwise borrow tomorrow's allowance for today.
+        deg_req = self.config.degradation_cost_gbp_per_mwh_throughput * (req_charge + req_discharge) * dt
+        expected_immediate = row.point * (req_discharge - req_charge) * dt - deg_req
+        # Model-expected SoC after the *recommended* action (no clamp — advisory).
+        rec_soc_after = (
+            self.soc
+            + self.config.charge_efficiency * req_charge * dt
+            - req_discharge * dt / self.config.discharge_efficiency
+        )
+        recommendation = ModelRecommendation(
+            energy_action=_energy_action(req_charge, req_discharge),
+            charge_mw=round(req_charge, 4),
+            discharge_mw=round(req_discharge, 4),
+            expected_immediate_pnl_gbp=round(expected_immediate, 4),
+            expected_horizon_pnl_gbp=round(expected_horizon, 2),
+            expected_soc_after_mwh=round(rec_soc_after, 4),
+            explanation=explanation,
+            binding_constraints=binding,
+            forecast_price=row.point,
+            issued_at=as_of,
+            information_cutoff=vintage.information_cutoff,
+            forecast_vintage_step=t,
+        )
+        self._pending = _PendingGate(
+            step=t, period=per, as_of=as_of, now=now, horizon=horizon, vintage=vintage,
+            cont=cont, recommendation=recommendation, proposed=proposed,
+            expected_horizon=expected_horizon, objective=objective,
+            planned_terminal_soc=planned_terminal_soc, warnings=step_warnings,
+        )
+        self.state = SessionState.AWAITING_TRADER_DECISION
+        self._log_transition(
+            "RECOMMENDATION",
+            {"now": now.isoformat() if now else None, "recommendation": recommendation.model_dump(mode="json")},
+        )
+        return recommendation
+
+    def submit_trader_instruction(
+        self,
+        decision: str,
+        *,
+        charge_mw: float = 0.0,
+        discharge_mw: float = 0.0,
+        reason: str | None = None,
+        actor: str | None = None,
+        source: str = "manual_ui",
+        at: datetime | None = None,
+    ) -> TraderInstruction:
+        """Stage 2 — record what the trader instructs (advisory rec unchanged).
+
+        ``at`` is the instruction timestamp; automatic replay passes the gate
+        time so runs stay reproducible, manual calls default to wall-clock now.
+        """
+        if self.state != SessionState.AWAITING_TRADER_DECISION or self._pending is None:
+            raise TraderLoopError(
+                f"Cannot submit a trader decision from state {self.state}; recommend first."
+            )
+        rec = self._pending.recommendation
+        if decision == "ACCEPT_RECOMMENDATION":
+            c, d = rec.charge_mw, rec.discharge_mw
+        elif decision == "REJECT_TO_IDLE":
+            c, d = 0.0, 0.0
+        elif decision == "MODIFY":
+            c, d = float(charge_mw), float(discharge_mw)
+        else:
+            raise TraderLoopError(
+                f"Unknown decision '{decision}' "
+                "(ACCEPT_RECOMMENDATION | MODIFY | REJECT_TO_IDLE)."
+            )
+        if c < 0 or d < 0:
+            raise TraderLoopError("Charge and discharge MW must be non-negative.")
+        if c > 1e-6 and d > 1e-6:
+            raise TraderLoopError("Cannot charge and discharge simultaneously.")
+        if c > self.config.maximum_charge_mw + 1e-6:
+            raise TraderLoopError(
+                f"Charge {c} MW exceeds the battery's {self.config.maximum_charge_mw} MW limit."
+            )
+        if d > self.config.maximum_discharge_mw + 1e-6:
+            raise TraderLoopError(
+                f"Discharge {d} MW exceeds the battery's {self.config.maximum_discharge_mw} MW limit."
+            )
+        instruction = TraderInstruction(
+            decision=decision, charge_mw=round(c, 4), discharge_mw=round(d, 4),
+            reason=reason, decided_at=at or datetime.now(tz=UTC), actor=actor, source=source,
+        )
+        self._pending.instruction = instruction
+        self.state = SessionState.AWAITING_EXECUTION
+        self._log_transition(
+            "TRADER_INSTRUCTION",
+            {
+                "decision": decision,
+                "charge_mw": charge_mw,
+                "discharge_mw": discharge_mw,
+                "reason": reason,
+                "actor": actor,
+                "source": source,
+                "at": instruction.decided_at.isoformat(),
+            },
+        )
+        return instruction
+
+    def apply_execution(self, execution_source: str | None = None) -> ExecutionRecord:
+        """Stage 3 — simulate the fill of the trader instruction."""
+        if self.state != SessionState.AWAITING_EXECUTION or self._pending is None:
+            raise TraderLoopError(
+                f"Cannot execute from state {self.state}; submit a trader decision first."
+            )
+        pg = self._pending
+        instr = pg.instruction
+        assert instr is not None
+        dt = pg.period.duration_hours
+        params = params_for(self.options.execution_mode, self.options.execution_params)
+        cap = params.max_executable_mw
+        exec_charge = (min(instr.charge_mw, cap) if cap is not None else instr.charge_mw) * params.fill_ratio
+        exec_discharge = (
+            min(instr.discharge_mw, cap) if cap is not None else instr.discharge_mw
+        ) * params.fill_ratio
+        # Daily cycle budget clamp at execution time.
         if self.config.maximum_cycles_per_day is not None:
             daily_budget = self.config.maximum_cycles_per_day * self.config.energy_capacity_mwh
             remaining_today = max(
-                daily_budget - self.discharged_by_date.get(per.settlement_date, 0.0), 0.0
+                daily_budget - self.discharged_by_date.get(pg.period.settlement_date, 0.0), 0.0
             )
             exec_discharge = min(exec_discharge, remaining_today / max(dt, 1e-9))
-        # Physical clamp AFTER the fill — executed volume drives SoC.
         exec_charge, exec_discharge, soc_after = self._apply_physics(exec_charge, exec_discharge, dt)
-        energy_action = _energy_action(exec_charge, exec_discharge)
-        up_cap, down_cap = self._capabilities(exec_charge, exec_discharge)
-
-        row = vintage.rows[0]
-        deg = self.config.degradation_cost_gbp_per_mwh_throughput * (exec_charge + exec_discharge) * dt
-        # Expected P&L is the model's plan: requested volumes at the forecast
-        # reference price, no execution costs (they are attributed separately).
-        deg_requested = (
-            self.config.degradation_cost_gbp_per_mwh_throughput * (req_charge + req_discharge) * dt
+        unfilled = (
+            max(instr.charge_mw - exec_charge, 0.0) + max(instr.discharge_mw - exec_discharge, 0.0)
+        ) * dt
+        status = "simulated"
+        if unfilled > 1e-6 and (exec_charge > 1e-6 or exec_discharge > 1e-6):
+            status = "partially_filled"
+        elif exec_charge < 1e-6 and exec_discharge < 1e-6 and (instr.charge_mw + instr.discharge_mw) > 1e-6:
+            status = "rejected"
+        src = execution_source or f"{self.options.execution_mode}_simulation"
+        execution = ExecutionRecord(
+            status=status,
+            requested_charge_mw=instr.charge_mw,
+            requested_discharge_mw=instr.discharge_mw,
+            executed_charge_mw=round(exec_charge, 4),
+            executed_discharge_mw=round(exec_discharge, 4),
+            executed_energy_mwh=round((exec_charge + exec_discharge) * dt, 4),
+            unfilled_mwh=round(unfilled, 4),
+            execution_source=src,
         )
-        expected_immediate = row.point * (req_discharge - req_charge) * dt - deg_requested
+        pg.execution = execution
+        pg.executed_soc_after = soc_after
+        self.state = SessionState.AWAITING_STATE_CONFIRMATION
+        self._log_transition(
+            "EXECUTION",
+            {"execution_source": execution_source, "execution": execution.model_dump(mode="json")},
+        )
+        return execution
 
-        cont_value_gbp = cont.gbp_per_mwh * planned_terminal_soc
+    def confirm_state(
+        self,
+        *,
+        executed_charge_mw: float | None = None,
+        executed_discharge_mw: float | None = None,
+        confirmed_soc_after_mwh: float | None = None,
+        soc_source: str = "executed_action_estimate",
+        execution_source: str | None = None,
+        at: datetime | None = None,
+    ) -> DecisionRecord:
+        """Stage 4 — reconcile the confirmed physical state and commit the gate.
+
+        Confirmed SoC drives the next optimisation. Priority: an explicit
+        ``confirmed_soc_after_mwh`` (telemetry / meter / manual) is authoritative;
+        otherwise the SoC implied by the executed action is used. The committed
+        :class:`DecisionRecord` (and all four sub-records) is immutable.
+        """
+        if self.state != SessionState.AWAITING_STATE_CONFIRMATION or self._pending is None:
+            raise TraderLoopError(
+                f"Cannot confirm state from {self.state}; execute first."
+            )
+        pg = self._pending
+        assert pg.execution is not None and pg.instruction is not None
+        dt = pg.period.duration_hours
+
+        # Optional manual override of executed volumes (e.g. confirmed fills).
+        exec_charge = pg.execution.executed_charge_mw
+        exec_discharge = pg.execution.executed_discharge_mw
+        executed_soc_after = pg.executed_soc_after
+        if executed_charge_mw is not None or executed_discharge_mw is not None:
+            exec_charge = float(executed_charge_mw or 0.0)
+            exec_discharge = float(executed_discharge_mw or 0.0)
+            exec_charge, exec_discharge, executed_soc_after = self._apply_physics(
+                exec_charge, exec_discharge, dt
+            )
+            pg.execution = pg.execution.model_copy(
+                update={
+                    "executed_charge_mw": round(exec_charge, 4),
+                    "executed_discharge_mw": round(exec_discharge, 4),
+                    "executed_energy_mwh": round((exec_charge + exec_discharge) * dt, 4),
+                    "status": "confirmed",
+                    "execution_source": execution_source or "manual_confirmation",
+                }
+            )
+
+        # Confirmed physical state (priority: telemetry/manual > executed estimate).
+        model_expected_soc = pg.recommendation.expected_soc_after_mwh
+        if confirmed_soc_after_mwh is not None:
+            confirmed = float(confirmed_soc_after_mwh)
+            if not (self.config.effective_min_soc - 1e-6 <= confirmed <= self.config.effective_max_soc + 1e-6):
+                raise TraderLoopError(
+                    f"Confirmed SoC {confirmed} MWh is outside the operating band "
+                    f"[{self.config.effective_min_soc}, {self.config.effective_max_soc}]."
+                )
+            state_status = "confirmed"
+        else:
+            confirmed = executed_soc_after
+            soc_source = "executed_action_estimate"
+            state_status = "estimated"
+        recon_diff = confirmed - executed_soc_after
+        physical_state = PhysicalStateRecord(
+            soc_before_mwh=round(self.soc, 4),
+            model_expected_soc_after_mwh=round(model_expected_soc, 4),
+            executed_implied_soc_after_mwh=round(executed_soc_after, 4),
+            confirmed_soc_after_mwh=round(confirmed, 4),
+            soc_source=soc_source,
+            confirmed_at=at or datetime.now(tz=UTC),
+            reconciliation_difference_mwh=round(recon_diff, 4),
+            status="inconsistent" if abs(recon_diff) > 1e-3 else state_status,
+        )
+
+        record = self._commit_gate(pg, exec_charge, exec_discharge, confirmed, physical_state)
+        self.state = SessionState.READY_FOR_NEXT_PERIOD
+        self._log_transition(
+            "PHYSICAL_STATE_CONFIRMATION",
+            {
+                "executed_charge_mw": executed_charge_mw,
+                "executed_discharge_mw": executed_discharge_mw,
+                "confirmed_soc_after_mwh": confirmed_soc_after_mwh,
+                "soc_source": soc_source,
+                "execution_source": execution_source,
+                "at": physical_state.confirmed_at.isoformat() if physical_state.confirmed_at else None,
+                # The schedule proposed at this gate is now historical; it is kept
+                # verbatim in the committed decision and superseded at the next gate.
+                "superseded_schedule_periods": len(record.proposed_schedule),
+            },
+        )
+        return record
+
+    def advance(self) -> None:
+        """Stage 5 — move to the next gate once the current one is resolved."""
+        if self.state != SessionState.READY_FOR_NEXT_PERIOD:
+            raise TraderLoopError(
+                f"Cannot advance from state {self.state}; confirm the physical state first."
+            )
+        self._pending = None
+        self.state = (
+            SessionState.COMPLETE if self.step_index >= len(self.periods)
+            else SessionState.READY_FOR_RECOMMENDATION
+        )
+        self._log_transition("ADVANCE", {"new_state": self.state.value})
+
+    def _commit_gate(
+        self,
+        pg: _PendingGate,
+        exec_charge: float,
+        exec_discharge: float,
+        confirmed_soc: float,
+        physical_state: PhysicalStateRecord,
+    ) -> DecisionRecord:
+        """Build & append the immutable DecisionRecord for a resolved gate."""
+        per = pg.period
+        dt = per.duration_hours
+        vintage = pg.vintage
+        cont = pg.cont
+        row = vintage.rows[0]
+        rec = pg.recommendation
+        instr = pg.instruction
+        assert instr is not None and pg.execution is not None
+
+        deg = self.config.degradation_cost_gbp_per_mwh_throughput * (exec_charge + exec_discharge) * dt
+        up_cap, down_cap = self._capabilities(exec_charge, exec_discharge)
+        cont_value_gbp = cont.gbp_per_mwh * pg.planned_terminal_soc
         cont_share = None
-        if objective is not None and abs(objective) > 1e-9:
-            cont_share = round(100.0 * cont_value_gbp / objective, 1)
+        step_warnings = list(pg.warnings)
+        if pg.objective is not None and abs(pg.objective) > 1e-9:
+            cont_share = round(100.0 * cont_value_gbp / pg.objective, 1)
             if cont_share > 50.0 and self.options.horizon_hours <= 24:
                 step_warnings.append(
                     f"Continuation value is {cont_share}% of the objective — the "
                     "horizon is short; consider 48 h or more."
                 )
+        if instr.decision != "ACCEPT_RECOMMENDATION":
+            step_warnings.append(
+                f"Trader {instr.decision.lower()} — executed action differs from the recommendation."
+            )
 
-        # --- Settle against the outturn (only once it exists / is published) --
+        params = params_for(self.options.execution_mode, self.options.execution_params)
         outturn = self.store.outturn("wholesale_price", per.settlement_date, per.settlement_period)
         settle_now = outturn is not None
-        if outturn is not None and self.options.live and now is not None:
-            settle_now = _utc(outturn.published_at) <= _utc(now)
+        if outturn is not None and self.options.live and pg.now is not None:
+            settle_now = _utc(outturn.published_at) <= _utc(pg.now)
         if settle_now and outturn is not None:
-            fill_res = apply_execution(req_charge, req_discharge, outturn.value, dt, exec_params)
-            # Volumes from the fill must match what moved the battery, minus the
-            # physics clamp (clamped volume is treated as never requested filled).
+            fill_res = apply_execution(exec_charge, exec_discharge, outturn.value, dt, params)
             e_charge = exec_charge * dt
             e_discharge = exec_discharge * dt
-            half = (
-                (fill_res.buy_price - outturn.value) if fill_res.buy_price is not None else 0.0
-            )
-            half_s = (
-                (outturn.value - fill_res.sell_price) if fill_res.sell_price is not None else 0.0
-            )
+            half = (fill_res.buy_price - outturn.value) if fill_res.buy_price is not None else 0.0
+            half_s = (outturn.value - fill_res.sell_price) if fill_res.sell_price is not None else 0.0
             spread_cost = half * e_charge + half_s * e_discharge
-            fee_cost = exec_params.fee_gbp_per_mwh * (e_charge + e_discharge)
+            fee_cost = params.fee_gbp_per_mwh * (e_charge + e_discharge)
             gross = outturn.value * (e_discharge - e_charge) - deg
             net = gross - spread_cost - fee_cost
+            pg.execution = pg.execution.model_copy(
+                update={
+                    "buy_price": fill_res.buy_price if exec_charge > 0 else None,
+                    "sell_price": fill_res.sell_price if exec_discharge > 0 else None,
+                    "spread_slippage_cost_gbp": round(spread_cost, 4),
+                    "fee_cost_gbp": round(fee_cost, 4),
+                }
+            )
             record_settlement = {
                 "settlement_status": "settled",
                 "actual_price": outturn.value,
@@ -465,20 +785,20 @@ class ReplayEngine:
             record_settlement = {"settlement_status": "pending"}
 
         record = DecisionRecord(
-            step=t,
+            step=pg.step,
             settlement_date=per.settlement_date,
             settlement_period=per.settlement_period,
             start_utc=per.start_utc,
             end_utc=per.end_utc,
             duration_hours=dt,
-            as_of=as_of,
+            as_of=pg.as_of,
             information_cutoff=vintage.information_cutoff,
             basis_max_published_at=vintage.basis_max_published_at,
             n_input_observations=vintage.n_input_observations,
             n_input_forecasts=vintage.n_input_forecasts,
             horizon_hours=self.options.horizon_hours,
-            horizon_n_periods=len(horizon),
-            horizon_end_utc=horizon[-1].end_utc,
+            horizon_n_periods=len(pg.horizon),
+            horizon_end_utc=pg.horizon[-1].end_utc,
             forecast_price=row.point,
             forecast_q10=row.q10,
             forecast_q90=row.q90,
@@ -488,25 +808,22 @@ class ReplayEngine:
             demand_forecast_mw=row.demand_forecast_mw,
             wind_forecast_mw=row.wind_forecast_mw,
             solar_forecast_mw=row.solar_forecast_mw,
-            energy_action=energy_action,
-            flexibility_position="NONE",  # wholesale-only replay holds no reserve position
+            energy_action=_energy_action(exec_charge, exec_discharge),
+            flexibility_position="NONE",
             up_capability_mw=round(up_cap, 2),
             down_capability_mw=round(down_cap, 2),
-            requested_charge_mw=round(req_charge, 4),
-            requested_discharge_mw=round(req_discharge, 4),
+            requested_charge_mw=round(instr.charge_mw, 4),
+            requested_discharge_mw=round(instr.discharge_mw, 4),
             charge_mw=round(exec_charge, 4),
             discharge_mw=round(exec_discharge, 4),
-            unfilled_mwh=round(
-                max(req_charge - exec_charge, 0.0) * dt + max(req_discharge - exec_discharge, 0.0) * dt,
-                4,
-            ),
+            unfilled_mwh=pg.execution.unfilled_mwh,
             soc_before_mwh=round(self.soc, 4),
-            soc_after_mwh=round(soc_after, 4),
-            expected_immediate_pnl_gbp=round(expected_immediate, 4),
-            expected_horizon_pnl_gbp=round(expected_horizon, 2),
-            explanation=explanation,
-            binding_constraints=binding,
-            proposed_schedule=proposed,
+            soc_after_mwh=round(confirmed_soc, 4),
+            expected_immediate_pnl_gbp=rec.expected_immediate_pnl_gbp,
+            expected_horizon_pnl_gbp=round(pg.expected_horizon, 2),
+            explanation=rec.explanation,
+            binding_constraints=rec.binding_constraints,
+            proposed_schedule=pg.proposed,
             continuation_gbp_per_mwh=cont.gbp_per_mwh,
             continuation_method=cont.method,
             continuation_value_gbp=round(cont_value_gbp, 2),
@@ -519,17 +836,44 @@ class ReplayEngine:
             continuation_warning=cont.warning,
             execution_mode=self.options.execution_mode,
             degradation_cost_gbp=round(deg, 4),
+            recommendation=rec,
+            trader_instruction=instr,
+            execution=pg.execution,
+            physical_state=physical_state,
             warnings=step_warnings,
             **record_settlement,
         )
 
-        self.soc = soc_after
+        # Confirmed SoC drives the next optimisation; cycle budget uses the
+        # executed (physical) discharge.
+        self.soc = confirmed_soc
         self.discharged_mwh += exec_discharge * dt
         self.discharged_by_date[per.settlement_date] = (
             self.discharged_by_date.get(per.settlement_date, 0.0) + exec_discharge * dt
         )
         self.decisions.append(record)
         self.vintages.append(vintage)
+        return record
+
+    # ------------------------------------------------------------------- step
+    def step(self, now: datetime | None = None) -> DecisionRecord | None:
+        """Automatic gate: recommend → auto-accept → simulate → reconcile → advance.
+
+        This is exactly the composition the manual API performs, so historical
+        replay and validation stay fully automated and reproducible.
+        """
+        if self.options.live and now is None:
+            now = datetime.now(tz=UTC)
+        rec = self.recommend(now)
+        if rec is None:
+            return None
+        gate_at = self._pending.as_of if self._pending else None
+        self.submit_trader_instruction(
+            "ACCEPT_RECOMMENDATION", source="automatic_policy", at=gate_at
+        )
+        self.apply_execution()
+        record = self.confirm_state(soc_source="executed_action_estimate", at=gate_at)
+        self.advance()
         return record
 
     def run(self, max_steps: int | None = None, now: datetime | None = None) -> list[DecisionRecord]:

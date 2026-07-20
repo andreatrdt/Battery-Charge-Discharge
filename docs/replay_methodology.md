@@ -139,17 +139,38 @@ with units such as £/MWh, £/MW or £/cycle.
 These are assumptions, not reconstructed order-book executions. MID remains a reference
 price, not a bid/ask quote.
 
-## Persistence and versioning
+## Persistence, audit trail and recovery
 
-Completed runs are archived in DuckDB with:
+Two DuckDB stores back every run:
 
-- options and battery configuration;
-- strategy, forecast, optimiser and execution version stamps;
-- full decisions and forecast vintages;
-- summaries and cached metrics.
+**`replay_runs`** — a snapshot document per run: options, battery configuration,
+strategy/forecast/optimiser/execution version stamps, decisions, forecast vintages,
+summaries and cached metrics. Written when the session is created and refreshed as it
+progresses.
 
-Archived runs survive backend restarts and are served read-only. Re-solves such as decision
-alternatives require a live in-memory session.
+**`replay_transitions`** — the **append-only audit trail**. Every state transition is
+appended with a monotonic sequence number and is never updated or deleted:
+
+| Transition | Recorded inputs |
+|---|---|
+| `RECOMMENDATION` | decision gate time, the advisory recommendation |
+| `TRADER_INSTRUCTION` | decision, MW, reason, actor, source, timestamp |
+| `EXECUTION` | execution source and the resulting fill |
+| `PHYSICAL_STATE_CONFIRMATION` | executed overrides, confirmed SoC, SoC source, and the size of the schedule being superseded |
+| `ADVANCE` | the resulting state (supersession point) |
+
+Because each stage is deterministic given its recorded inputs and the point-in-time
+store, an **active mid-flight session is recoverable after a process restart** by
+replaying the log: the exact state-machine position, SoC, cycle budgets, committed
+decisions and superseded schedules are restored, and the gate can then be completed
+normally. Recovery only reads the log; it never rewrites history, and the engine's
+audit hook is disabled while replaying so no duplicate rows are appended.
+
+If the database cannot be opened (DuckDB allows a single writer process), the archive
+degrades to a disabled no-op: replays continue in memory, `persistence_available` is
+`false` and a warning states the run will not survive a restart — never a 500.
+
+Re-solves such as decision alternatives require a live (or recovered) session.
 
 ## Leakage audit
 

@@ -5,7 +5,7 @@ import { api, type OptimisationResult } from "./api";
 import { useAppState } from "./store";
 
 export function useOptimise(mode = "deterministic", extra: Record<string, unknown> = {}) {
-  const { config, day, source, offline } = useAppState();
+  const { config, day, source } = useAppState();
   const [result, setResult] = useState<OptimisationResult | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -15,7 +15,7 @@ export function useOptimise(mode = "deterministic", extra: Record<string, unknow
     setLoading(true);
     setError(null);
     try {
-      const res = await api.optimise({ config, day, source, offline, mode, ...extra });
+      const res = await api.optimise({ config, day, source, mode, ...extra });
       setResult(res.result);
       setWarnings(res.snapshot?.warnings || res.result.warnings || []);
     } catch (e) {
@@ -24,7 +24,7 @@ export function useOptimise(mode = "deterministic", extra: Record<string, unknow
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(config), day, source, offline, mode, JSON.stringify(extra)]);
+  }, [JSON.stringify(config), day, source, mode, JSON.stringify(extra)]);
 
   useEffect(() => {
     run();

@@ -38,6 +38,11 @@ class BacktestRequest(BaseModel):
     strategies: list[str] | None = None
     up_availability_price: float = 0.0
     down_availability_price: float = 0.0
+    # Global data source. The daily backtest needs BOTH a day-ahead price
+    # forecast column and a realised outturn column per period, so only
+    # synthetic and sample are supported; elexon is rejected explicitly rather
+    # than silently substituted (see the endpoint).
+    source: str = "synthetic"
 
 
 class ForecastValidateRequest(BaseModel):

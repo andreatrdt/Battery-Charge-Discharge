@@ -68,6 +68,42 @@ export default function MethodologyPage() {
         </ul>
       </Panel>
 
+      <Panel title="Trader-in-the-loop: recommendation ≠ instruction ≠ execution ≠ state">
+        <p className="text-sm text-terminal-muted">
+          The optimiser produces a <em>recommendation</em>, not the physical truth. Four things are
+          kept as separate, immutable records at every gate:
+        </p>
+        <ol className="mt-2 text-sm text-terminal-muted list-decimal pl-5 space-y-1">
+          <li><strong>Model recommendation</strong> — advisory MW, expected P&amp;L and SoC.</li>
+          <li><strong>Trader instruction</strong> — accept, modify or reject to idle.</li>
+          <li><strong>Market execution</strong> — simulated fill of the <em>instruction</em> (may differ: caps, partial fills).</li>
+          <li><strong>Confirmed physical state</strong> — telemetry / meter / manual SoC if supplied (authoritative), else the executed-action estimate.</li>
+        </ol>
+        <p className="mt-2 text-sm text-terminal-muted">
+          The next optimisation always starts from the <strong>confirmed</strong> SoC, and every gate
+          is recalculated from scratch on the latest point-in-time information; the previous future
+          schedule is advisory and is marked superseded. Manual mode enforces the state machine
+          (recommend → decide → execute → confirm → advance) and rejects invalid transitions
+          (executing before a recommendation, advancing before confirmation, simultaneous
+          charge/discharge, MW beyond limits, out-of-band SoC). <strong>Automatic</strong> historical
+          replay is exactly this loop with an automatic accept, so it stays fully reproducible.
+        </p>
+      </Panel>
+
+      <Panel title="Unified data source">
+        <p className="text-sm text-terminal-muted">
+          One global source — <code className="text-kind-observed">synthetic</code>,{" "}
+          <code className="text-kind-observed">sample</code> or{" "}
+          <code className="text-kind-observed">elexon</code> — is honoured across every page.
+          Synthetic and sample never touch the network; Elexon failures surface as an explicit error
+          (a clear 502 for a fully unavailable snapshot) and are <em>never</em> silently replaced with
+          synthetic values. Every market response reports its provenance: requested vs actual source,
+          network/cache use, requested vs actual data day and any warnings. Missing series serialise as
+          JSON <code>null</code> (NaN/Inf/NaT are scrubbed), so a partial Elexon snapshot returns 200
+          with nulls rather than an unexplained 500.
+        </p>
+      </Panel>
+
       <Panel title="Cross-day horizon and continuation value">
         <p className="text-sm text-terminal-muted">
           The optimisation horizon defaults to 48 hours and crosses midnight so the battery is not

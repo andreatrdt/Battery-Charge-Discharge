@@ -173,7 +173,7 @@ export default function ForecastValidationPage() {
             <span className="text-terminal-muted">Source</span>
             <select
               value={source}
-              onChange={(e) => setSource(e.target.value)}
+              onChange={(e) => setSource(e.target.value as typeof source)}
               className="rounded border border-terminal-border bg-terminal-bg px-2 py-1"
             >
               <option value="sample">Bundled sample</option>
@@ -248,9 +248,13 @@ export default function ForecastValidationPage() {
               sub={bestRmse ? modelName(bestRmse.model) : undefined}
             />
             <Stat
-              label="Best strategy P&L"
+              label="Best strategy P&L (capped subset)"
               value={bestPnl?.strategy_pnl_gbp != null ? gbp(bestPnl.strategy_pnl_gbp) : "—"}
-              sub={bestPnl ? modelName(bestPnl.model) : "not requested"}
+              sub={
+                bestPnl
+                  ? `${modelName(bestPnl.model)} — of ${result.price.strategy_pnl_models.length} replayed`
+                  : "not requested"
+              }
               accent="#22c55e"
             />
             <Stat
@@ -273,7 +277,36 @@ export default function ForecastValidationPage() {
             </p>
           </Learn>
 
-          <Panel title="Benchmark comparison — statistical and economic">
+          <Panel title="Benchmark comparison — statistical (all models) + economic (capped subset)">
+            <div className="mb-3 space-y-2 rounded border border-kind-estimated/40 bg-kind-estimated/10 px-3 py-2 text-[11px]">
+              <div>
+                <span className="inline-block rounded bg-kind-observed/20 px-1.5 py-0.5 font-bold uppercase text-kind-observed">
+                  Statistical — all {table.length} models
+                </span>{" "}
+                <span className="text-terminal-muted">
+                  MAE, RMSE, bias, correlation, direction, ramp and peak/trough timing are computed
+                  for every selected model over the full point-in-time path.
+                </span>
+              </div>
+              <div>
+                <span className="inline-block rounded bg-kind-estimated/25 px-1.5 py-0.5 font-bold uppercase text-kind-estimated">
+                  Economic — capped diagnostic ({result.price.strategy_pnl_models.length} of {table.length})
+                </span>{" "}
+                <span className="text-terminal-muted">
+                  Strategy P&amp;L replays a full rolling day per model, so it is bounded for
+                  interactive use: only{" "}
+                  <strong>{result.price.strategy_pnl_models.map(modelName).join(" and ")}</strong>{" "}
+                  were replayed, over the selected day range with a{" "}
+                  <strong>shrinking within-range horizon</strong> (not the 48 h cross-day horizon the
+                  product uses) and a fixed continuation value. Models marked{" "}
+                  <em>not computed</em> were not replayed at all.
+                </span>
+              </div>
+              <div className="font-semibold text-kind-estimated">
+                This is a performance-bounded indicator, not a complete economic comparison. Do not
+                rank all models by economics from this table.
+              </div>
+            </div>
             <div className="scroll-x">
               <table className="w-full text-[11px] tabular">
                 <thead>
@@ -319,7 +352,11 @@ export default function ForecastValidationPage() {
                       <td className="px-2 py-1">{row.trough_timing_error_sp}</td>
                       <td className="px-2 py-1">{num(row.start_of_day_mae)}</td>
                       <td className="px-2 py-1 font-semibold text-action-charge">
-                        {row.strategy_pnl_gbp == null ? "—" : gbp(row.strategy_pnl_gbp)}
+                        {row.strategy_pnl_gbp == null ? (
+                          <span className="text-terminal-muted italic font-normal">not computed</span>
+                        ) : (
+                          gbp(row.strategy_pnl_gbp)
+                        )}
                       </td>
                     </tr>
                   ))}

@@ -1,7 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, replayApi, type ReplayInputsPayload, type ReplaySummary } from "../lib/api";
+import {
+  api,
+  replayApi,
+  type MarketSnapshot,
+  type ReplayInputsPayload,
+  type ReplaySummary,
+} from "../lib/api";
+import { useAppState } from "../lib/store";
+import { SourceBanner } from "../components/SourceBanner";
 import { ErrorNote, Panel, Spinner } from "../components/ui";
 
 interface LastReplay {
@@ -31,10 +39,116 @@ export default function DataExplorer() {
           bundled synthetic demonstration dataset are kept strictly separate.
         </p>
       </div>
+      <GlobalSourceSnapshot />
       <CurrentRunInputs />
       <ArchivedRuns />
       <BundledSample />
     </div>
+  );
+}
+
+/* --------------------------------------------- global-source live snapshot */
+
+/**
+ * The Data page follows the same global source as every other page. This
+ * section always shows what the *currently selected* source actually returns
+ * for the selected day, with full provenance — never a silent substitution.
+ */
+function GlobalSourceSnapshot() {
+  const { day, source, networkPolicy } = useAppState();
+  const [snap, setSnap] = useState<MarketSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    setSnap(null);
+    api
+      .snapshot(day, source, networkPolicy)
+      .then(setSnap)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false));
+  }, [day, source, networkPolicy]);
+
+  const downloadCsv = () => {
+    if (!snap?.periods.length) return;
+    const cols = Object.keys(snap.periods[0]);
+    const lines = snap.periods.map((r) => cols.map((c) => r[c] ?? "").join(","));
+    const blob = new Blob([[cols.join(","), ...lines].join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `gb_battery_${source}_${snap.day}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <Panel
+      title={`Selected source — ${source} (global)`}
+      right={
+        snap && (
+          <button
+            onClick={downloadCsv}
+            className="rounded border border-terminal-border px-2 py-1 text-[11px] hover:bg-terminal-border/40"
+          >
+            Download CSV
+          </button>
+        )
+      }
+    >
+      <SourceBanner provenance={snap?.provenance} warnings={snap?.warnings} />
+      {error && (
+        <div className="mt-2">
+          <ErrorNote
+            error={`${error} — the selected source did not return data. Nothing was substituted; switch the Source selector or the Elexon network policy in the header.`}
+          />
+        </div>
+      )}
+      {loading && <Spinner label={`Loading ${source} data for ${day}…`} />}
+      {snap && !loading && (
+        <div className="mt-2">
+          <div className="mb-2 flex flex-wrap gap-2 text-[11px]">
+            {snap.statuses.map((s) => (
+              <span
+                key={s.source}
+                className="rounded border border-terminal-border px-2 py-0.5"
+                title={s.detail}
+              >
+                {s.source}: <span className={s.ok ? "text-action-charge" : "text-action-discharge"}>{s.ok ? "ok" : "missing"}</span>{" "}
+                <span className="text-terminal-muted">({s.kind})</span>
+              </span>
+            ))}
+          </div>
+          <div className="scroll-x max-h-72 overflow-y-auto rounded border border-terminal-border/60">
+            <table className="w-full text-[11px] tabular">
+              <thead className="sticky top-0 bg-terminal-panel">
+                <tr className="text-terminal-muted text-left">
+                  {Object.keys(snap.periods[0] || {}).map((c) => (
+                    <th key={c} className="whitespace-nowrap px-2 py-1 border-b border-terminal-border">{c}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {snap.periods.slice(0, 48).map((r, i) => (
+                  <tr key={i} className="border-b border-terminal-border/30">
+                    {Object.keys(snap.periods[0] || {}).map((c) => (
+                      <td key={c} className="whitespace-nowrap px-2 py-0.5">
+                        {r[c] === null || r[c] === undefined ? "—" : String(r[c])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-1 text-[10px] text-terminal-muted">
+            Missing series render as “—” (JSON null), never as a substituted value.
+          </p>
+        </div>
+      )}
+    </Panel>
   );
 }
 

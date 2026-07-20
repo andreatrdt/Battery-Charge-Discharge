@@ -233,18 +233,17 @@ def validate_price_forecasts(
     config: BatteryConfig | None = None,
     with_strategy_pnl: bool = True,
     options: ReplayOptions | None = None,
-    max_strategy_models: int = 3,
-    strategy_horizon_hours: int = 24,
+    max_strategy_models: int = 2,
 ) -> dict:
     """Benchmark every price model statistically AND economically.
 
     Statistical metrics are cheap and computed for **every** model. Each economic
     strategy P&L, by contrast, replays a full rolling day per model, so it is
     bounded for tractability: at most ``max_strategy_models`` (internal model
-    first, then the others in order) are replayed, using a lighter
-    ``strategy_horizon_hours`` horizon and an O(1) fixed continuation value so a
-    browser request returns in seconds rather than minutes. Models beyond the
-    cap report ``strategy_pnl_gbp = None``.
+    first, then the others in order) are replayed, over the day range only
+    (a shrinking within-range horizon) with an O(1) fixed continuation value,
+    so a browser request returns in seconds rather than minutes. Models beyond
+    the cap report ``strategy_pnl_gbp = None``.
     """
     models = models or ["persistence", "lag_same_sp_1d", "rolling_median_7d", "internal_model"]
     config = config or BatteryConfig()
@@ -276,13 +275,12 @@ def validate_price_forecasts(
         update={"terminal_soc_value_gbp_per_mwh": config.discharge_efficiency * median_price}
     )
     strategy_options = ReplayOptions(
-        **{
-            **base_options.model_dump(),
-            "n_days": n_days,
-            "horizon_hours": strategy_horizon_hours,
-            "terminal_treatment": "config",
-        }
+        **{**base_options.model_dump(), "n_days": n_days, "terminal_treatment": "config"}
     )
+    # Explicit periods = the day range only, so the horizon shrinks within the
+    # range (no cross-midnight extension) — self-contained and fast enough for
+    # an interactive request.
+    strategy_periods = list(periods)
 
     table = []
     heatmap = None
@@ -333,6 +331,7 @@ def validate_price_forecasts(
                 options=strategy_options,
                 store=store,
                 forecaster=fc,
+                periods=strategy_periods,
             )
             eng.run()
             strategy_pnl = eng.realised_summary()["realised_pnl_gbp"]
@@ -357,9 +356,9 @@ def validate_price_forecasts(
             "Strategy P&L runs the identical rolling replay with each model — a "
             "statistically better forecast is not declared better until it also "
             "earns more. For tractability strategy P&L is computed for at most "
-            f"{max_strategy_models} models (internal model first) using a "
-            f"{strategy_horizon_hours} h horizon and a fixed continuation value; "
-            "other models show a blank strategy P&L."
+            f"{max_strategy_models} models (internal model first) over the day "
+            "range with a fixed continuation value; other models show a blank "
+            "strategy P&L."
         ),
         "strategy_pnl_models": sorted(strategy_set),
         "table": table,

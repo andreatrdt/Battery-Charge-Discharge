@@ -4,10 +4,12 @@ import { useEffect, useState } from "react";
 import { api, num, type MarketSnapshot, type DataKind } from "./lib/api";
 import { useAppState } from "./lib/store";
 import { MultiSeriesChart } from "./components/charts";
+import { MarketTimeline } from "./components/MarketTimeline";
+import { SourceBanner } from "./components/SourceBanner";
 import { ErrorNote, KindBadge, Panel, Spinner, Stat } from "./components/ui";
 
 export default function MarketOverview() {
-  const { day, offline, setOffline } = useAppState();
+  const { day, source, networkPolicy } = useAppState();
   const [snap, setSnap] = useState<MarketSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -15,12 +17,13 @@ export default function MarketOverview() {
   useEffect(() => {
     setLoading(true);
     setError(null);
+    setSnap(null);
     api
-      .snapshot(day, offline)
+      .snapshot(day, source, networkPolicy)
       .then(setSnap)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
-  }, [day, offline]);
+  }, [day, source, networkPolicy]);
 
   const rows = (snap?.periods || []).map((p) => ({
     sp: p.settlement_period as number,
@@ -41,21 +44,23 @@ export default function MarketOverview() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold">Market Overview — {day}</h1>
-          <p className="text-xs text-terminal-muted">
-            National demand, wind/solar, residual demand, wholesale (MID) &amp; system price.
-          </p>
-        </div>
-        <label className="flex items-center gap-2 text-xs text-terminal-muted">
-          <input type="checkbox" checked={offline} onChange={(e) => setOffline(e.target.checked)} />
-          Offline demo mode
-        </label>
+      <div>
+        <h1 className="text-lg font-semibold">Market Overview — {day}</h1>
+        <p className="text-xs text-terminal-muted">
+          National demand, wind/solar, residual demand, wholesale reference price (MID) &amp;
+          imbalance system price. Source is the global selector in the header.
+        </p>
       </div>
 
-      {error && <ErrorNote error={error} />}
-      {loading && <Spinner label="Fetching market data…" />}
+      <MarketTimeline highlight="imbalance" />
+      <SourceBanner provenance={snap?.provenance} warnings={snap?.warnings} />
+
+      {error && (
+        <ErrorNote
+          error={`${error} — Elexon may be unavailable. Try the header's network policy (cache only), or switch Source to Frozen sample or Synthetic.`}
+        />
+      )}
+      {loading && <Spinner label={`Loading ${source} market data…`} />}
 
       {snap && !loading && (
         <>

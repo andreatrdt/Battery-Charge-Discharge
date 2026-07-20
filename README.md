@@ -62,7 +62,9 @@ Carry SoC / cycles / P&L forward and repeat
 - **Market** — observed/forecast fundamentals, MID and imbalance settlement price.
 - **Battery** — power, energy, efficiency, grid and degradation configuration.
 - **Terminal** — single-shot deterministic/stochastic/robust optimisation, clearly labelled.
-- **Replay & Live** — cross-day point-in-time historical replay and live paper trading.
+- **Replay & Live** — cross-day point-in-time historical replay, **trader-in-the-loop**
+  manual mode (model recommendation → trader instruction → simulated execution →
+  confirmed physical state → next optimisation), and live paper trading.
 - **Forecast Validation** — benchmark forecasts, probabilistic calibration, heatmaps and
   downstream strategy P&L.
 - **Schedule** — single-shot planned schedule; not the rolling replay result.
@@ -156,9 +158,17 @@ not reconstructed exchange fills.
 
 ## Data and provenance
 
-Sources include public Elexon Insights/BMRS endpoints and a bundled seeded synthetic sample.
+One global data source — `synthetic`, `sample` or `elexon` — is honoured across every
+page. Synthetic and sample are fully offline; Elexon fetches public Elexon Insights/BMRS
+endpoints (with an optional network policy: live-with-cache, cache-only, or live-only).
+Elexon failures surface as an explicit error (a clear 502 for a fully unavailable
+snapshot) and are **never** silently replaced with synthetic values. Every market
+response reports its provenance — requested vs actual source, network/cache use,
+requested vs actual data day and warnings — and all payloads are JSON-safe
+(NaN/Inf/NaT → null).
+
 Every important value is labelled as observed, published forecast, internal model forecast,
-reconstructed, synthetic, assumed, paper trade, experimental or perfect foresight.
+reconstructed, synthetic, cached, assumed, paper trade, experimental or perfect foresight.
 
 MID has no per-record publication timestamp. Historical availability is therefore
 reconstructed as Settlement Period end plus a configurable lag (10 minutes by default)

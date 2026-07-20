@@ -432,6 +432,148 @@ def compare_replay_strategies(engine: ReplayEngine) -> dict:
     }
 
 
+# --------------------------------------------------- trader-intervention metrics
+
+
+def intervention_metrics(decisions: list[DecisionRecord]) -> dict:
+    """How the trader intervened vs the model, and what it cost/earned.
+
+    Separates the four effects the prompt asks never to merge: forecast error,
+    decision override, execution, and state reconciliation. All computed from
+    the immutable per-gate sub-records.
+    """
+    with_instr = [d for d in decisions if d.trader_instruction is not None]
+
+    def _decision(d: DecisionRecord) -> str:
+        assert d.trader_instruction is not None
+        return d.trader_instruction.decision
+
+    accepted = [d for d in with_instr if _decision(d) == "ACCEPT_RECOMMENDATION"]
+    modified = [d for d in with_instr if _decision(d) == "MODIFY"]
+    rejected = [d for d in with_instr if _decision(d) == "REJECT_TO_IDLE"]
+
+    deviations = []
+    for d in with_instr:
+        rec = d.recommendation
+        instr = d.trader_instruction
+        if rec is not None and instr is not None:
+            dev = abs((instr.charge_mw - instr.discharge_mw) - (rec.charge_mw - rec.discharge_mw))
+            deviations.append(dev)
+
+    # Reason distribution.
+    reasons: dict[str, int] = {}
+    for d in modified + rejected:
+        instr = d.trader_instruction
+        if instr is None:
+            continue
+        key = (instr.reason or "(no reason given)").strip() or "(no reason given)"
+        reasons[key] = reasons.get(key, 0) + 1
+
+    # State-reconciliation diagnostics.
+    states = [d.physical_state for d in decisions if d.physical_state is not None]
+    stale = [s for s in states if s.status in ("stale", "inconsistent")]
+    recon = [abs(s.reconciliation_difference_mwh) for s in states]
+    soc_err = [
+        abs(s.confirmed_soc_after_mwh - s.model_expected_soc_after_mwh) for s in states
+    ]
+
+    # Immediate override P&L effect (settled periods only): trader vs the model's
+    # recommended action, both marked to the actual price.
+    override_effect = 0.0
+    model_wins = trader_wins = ties = 0
+    for d in decisions:
+        if d.settlement_status != "settled" or d.actual_price is None:
+            continue
+        rec = d.recommendation
+        instr = d.trader_instruction
+        if rec is None or instr is None:
+            continue
+        dt = d.duration_hours
+        # Isolate the DECISION override: the trader's *instructed* action vs the
+        # model's *recommended* action, both marked to the actual price. Execution
+        # differences are a separate effect (see attribution's volume effect), so
+        # an all-accept run scores exactly zero here (degradation nets out).
+        rec_pnl = d.actual_price * (rec.discharge_mw - rec.charge_mw) * dt
+        trader_pnl = d.actual_price * (instr.discharge_mw - instr.charge_mw) * dt
+        override_effect += trader_pnl - rec_pnl
+        if trader_pnl > rec_pnl + 1e-6:
+            trader_wins += 1
+        elif rec_pnl > trader_pnl + 1e-6:
+            model_wins += 1
+        else:
+            ties += 1
+
+    n = len(with_instr)
+    return {
+        "n_decisions": n,
+        "accepted": len(accepted),
+        "modified": len(modified),
+        "rejected": len(rejected),
+        "acceptance_rate_pct": round(100.0 * len(accepted) / n, 1) if n else None,
+        "avg_abs_mw_deviation": round(mean(deviations), 3) if deviations else 0.0,
+        "immediate_override_pnl_effect_gbp": round(override_effect, 2),
+        "model_vs_trader": {
+            "model_better": model_wins,
+            "trader_better": trader_wins,
+            "ties": ties,
+        },
+        "reason_distribution": reasons,
+        "periods_stale_or_unconfirmed": len(stale),
+        "avg_soc_reconciliation_diff_mwh": round(mean(recon), 4) if recon else 0.0,
+        "avg_model_expected_vs_confirmed_soc_error_mwh": round(mean(soc_err), 4) if soc_err else 0.0,
+        "note": (
+            "Override effect is the immediate-period difference (trader action vs the "
+            "model's recommended action, both marked to the actual price). It is not a "
+            "full-horizon causal attribution — a one-period deviation changes the future "
+            "path, which is only captured by re-running a separate simulated branch."
+        ),
+    }
+
+
+def immediate_counterfactuals(decisions: list[DecisionRecord]) -> list[dict]:
+    """Per-decision immediate-period counterfactual (only where the trader deviated)."""
+    out = []
+    for d in decisions:
+        if d.recommendation is None or d.trader_instruction is None:
+            continue
+        if d.trader_instruction.decision == "ACCEPT_RECOMMENDATION":
+            continue
+        dt = d.duration_hours
+        rec = d.recommendation
+        instr = d.trader_instruction
+        rec_pnl = trader_pnl = None
+        if d.settlement_status == "settled" and d.actual_price is not None:
+            rec_pnl = round(d.actual_price * (rec.discharge_mw - rec.charge_mw) * dt, 2)
+            trader_pnl = round(d.actual_price * (instr.discharge_mw - instr.charge_mw) * dt, 2)
+        out.append(
+            {
+                "step": d.step,
+                "settlement_period": d.settlement_period,
+                "decision": d.trader_instruction.decision,
+                "reason": d.trader_instruction.reason,
+                "model_recommended": {
+                    "energy_action": rec.energy_action,
+                    "charge_mw": rec.charge_mw,
+                    "discharge_mw": rec.discharge_mw,
+                    "expected_soc_after_mwh": rec.expected_soc_after_mwh,
+                },
+                "trader_executed": {
+                    "energy_action": d.energy_action,
+                    "charge_mw": d.charge_mw,
+                    "discharge_mw": d.discharge_mw,
+                    "confirmed_soc_after_mwh": d.soc_after_mwh,
+                },
+                "model_recommended_realised_pnl_gbp": rec_pnl,
+                "trader_realised_pnl_gbp": trader_pnl,
+                "override_contribution_gbp": (
+                    round(trader_pnl - rec_pnl, 2) if rec_pnl is not None and trader_pnl is not None else None
+                ),
+                "ending_soc_difference_mwh": round(d.soc_after_mwh - rec.expected_soc_after_mwh, 3),
+            }
+        )
+    return out
+
+
 # ------------------------------------------------------------ price error heatmap
 
 

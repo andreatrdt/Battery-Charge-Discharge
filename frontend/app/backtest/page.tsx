@@ -1,9 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { api, gbp, num } from "../lib/api";
+import {
+  ApiError,
+  api,
+  gbp,
+  num,
+  type SourceProvenance,
+  type UnsupportedSource,
+} from "../lib/api";
 import { useAppState } from "../lib/store";
 import { MultiSeriesChart } from "../components/charts";
+import { SourceBanner } from "../components/SourceBanner";
 import { ErrorNote, Panel, Spinner, Stat } from "../components/ui";
 
 type Row = Record<string, number | string>;
@@ -17,27 +25,46 @@ const NICE: Record<string, string> = {
 };
 
 export default function BacktestPage() {
-  const { config } = useAppState();
+  const { config, source } = useAppState();
   const [days, setDays] = useState(21);
   const [table, setTable] = useState<Row[]>([]);
   const [equity, setEquity] = useState<{ index: number; cumulative_pnl: number }[]>([]);
   const [perfect, setPerfect] = useState<number | null>(null);
   const [audit, setAudit] = useState<{ check: string; ok: boolean; detail: string }[]>([]);
+  const [provenance, setProvenance] = useState<SourceProvenance | null>(null);
+  const [unsupported, setUnsupported] = useState<UnsupportedSource | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const reset = () => {
+    setTable([]);
+    setEquity([]);
+    setPerfect(null);
+    setAudit([]);
+    setProvenance(null);
+    setUnsupported(null);
+    setError(null);
+  };
+
   const run = () => {
     setLoading(true);
-    setError(null);
+    reset();
     api
-      .backtest({ config, days })
+      .backtest({ config, days, source })
       .then((r) => {
         setTable(r.table);
         setEquity(r.equity_curve);
         setPerfect(r.perfect_foresight_pnl_gbp);
         setAudit(r.leakage_audit);
+        setProvenance(r.provenance);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .catch((e) => {
+        // An unsupported source is an explicit state, not a generic error —
+        // and nothing is substituted.
+        const detail = e instanceof ApiError ? (e.detail as UnsupportedSource | undefined) : undefined;
+        if (detail && detail.status === "unsupported_source") setUnsupported(detail);
+        else setError(e instanceof Error ? e.message : String(e));
+      })
       .finally(() => setLoading(false));
   };
 
@@ -50,6 +77,11 @@ export default function BacktestPage() {
             Forecast-driven decisions settled on outturn prices. Benchmarks vs a perfect-foresight
             upper bound. Backtested returns are <em>not</em> achievable live.
           </p>
+          <p className="mt-1 text-[11px] text-terminal-muted">
+            Runs on the global source (<strong>{source}</strong>). The daily backtest needs a
+            day-ahead price forecast <em>and</em> a realised outturn per period, so Elexon is
+            reported as unsupported rather than silently replaced.
+          </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
           <label className="text-terminal-muted">Days</label>
@@ -60,8 +92,37 @@ export default function BacktestPage() {
         </div>
       </div>
 
+      {provenance && <SourceBanner provenance={provenance} warnings={provenance.warnings} />}
+
+      {unsupported && (
+        <Panel title={`Backtest unavailable for source “${unsupported.requested_source}”`}>
+          <div className="space-y-2 text-xs">
+            <div className="inline-block rounded bg-kind-estimated/15 px-2 py-0.5 text-[10px] font-bold uppercase text-kind-estimated">
+              Unsupported source — nothing was run, nothing was substituted
+            </div>
+            <p className="text-terminal-muted leading-relaxed">{unsupported.reason}</p>
+            <p>
+              <span className="text-terminal-muted">Requested source: </span>
+              {unsupported.requested_source} ·{" "}
+              <span className="text-terminal-muted">Actual source: </span>
+              {unsupported.actual_source ?? "none (no data produced)"} ·{" "}
+              <span className="text-terminal-muted">Network used: </span>
+              {unsupported.network_used ? "yes" : "no"} ·{" "}
+              <span className="text-terminal-muted">Cache used: </span>
+              {unsupported.cache_used ? "yes" : "no"}
+            </p>
+            <p className="text-terminal-muted">
+              Supported here: {unsupported.supported_sources.join(", ")}. Change the Source selector
+              in the header, or use{" "}
+              <a href="/replay" className="underline text-kind-observed">Replay &amp; Live</a> for
+              point-in-time Elexon analysis.
+            </p>
+          </div>
+        </Panel>
+      )}
+
       {error && <ErrorNote error={error} />}
-      {loading && <Spinner label="Running rolling backtest…" />}
+      {loading && <Spinner label={`Running rolling backtest on ${source}…`} />}
 
       {table.length > 0 && !loading && (
         <>
@@ -132,7 +193,9 @@ export default function BacktestPage() {
           </Panel>
         </>
       )}
-      {table.length === 0 && !loading && <p className="text-sm text-terminal-muted">Click “Run backtest”.</p>}
+      {table.length === 0 && !loading && !unsupported && !error && (
+        <p className="text-sm text-terminal-muted">Click “Run backtest”.</p>
+      )}
     </div>
   );
 }

@@ -20,7 +20,8 @@ const LINKS: [string, string][] = [
 
 export function NavBar() {
   const pathname = usePathname();
-  const { day, setDay, source, setSource, learning, setLearning } = useAppState();
+  const { day, setDay, source, setSource, networkPolicy, setNetworkPolicy, learning, setLearning } =
+    useAppState();
   return (
     <header className="sticky top-0 z-20 border-b border-terminal-border bg-terminal-panel/95 backdrop-blur">
       <div className="mx-auto max-w-[1500px] px-4">
@@ -51,13 +52,26 @@ export function NavBar() {
             <label className="text-terminal-muted ml-2">Source</label>
             <select
               value={source}
-              onChange={(e) => setSource(e.target.value)}
+              onChange={(e) => setSource(e.target.value as typeof source)}
+              title="One global source for every page. Synthetic and Frozen sample are offline; Elexon fetches real public data."
               className="bg-terminal-bg border border-terminal-border rounded px-2 py-1"
             >
               <option value="synthetic">Synthetic</option>
               <option value="sample">Frozen sample</option>
-              <option value="elexon">Elexon (live)</option>
+              <option value="elexon">Elexon (public data)</option>
             </select>
+            {source === "elexon" && (
+              <select
+                value={networkPolicy}
+                onChange={(e) => setNetworkPolicy(e.target.value as typeof networkPolicy)}
+                title="Elexon network policy. Cache-only never makes a network request."
+                className="bg-terminal-bg border border-terminal-border rounded px-2 py-1"
+              >
+                <option value="live_with_cache">Live + cache fallback</option>
+                <option value="cache_only">Cache only</option>
+                <option value="live_only">Live only</option>
+              </select>
+            )}
           </div>
         </div>
         <nav className="flex gap-1 overflow-x-auto pb-1 scroll-x">

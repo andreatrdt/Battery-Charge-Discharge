@@ -1,7 +1,14 @@
 // Typed client for the GB Battery Co-Optimisation API.
 // All requests go to /api/* which Next.js proxies to the FastAPI backend.
 
-export type DataKind = "observed" | "forecast" | "estimated" | "assumption" | "synthetic";
+export type DataKind =
+  | "observed"
+  | "forecast"
+  | "estimated"
+  | "assumption"
+  | "synthetic"
+  | "missing"
+  | "cached";
 export type ActionLabel = "CHARGE" | "DISCHARGE" | "IDLE" | "RESERVE UP" | "RESERVE DOWN";
 
 export interface BatteryConfig {
@@ -94,11 +101,55 @@ export interface SourceStatus {
   retrieved_at: string | null;
 }
 
+export interface SourceProvenance {
+  requested_source: string;
+  actual_source: string;
+  requested_day: string;
+  actual_data_day: string;
+  date_substituted: boolean;
+  network_used: boolean;
+  cache_used: boolean;
+  // Range-based sources (e.g. the multi-day backtest) add these.
+  actual_data_day_start?: string;
+  actual_data_day_end?: string;
+  requested_days?: number;
+  actual_days?: number;
+  warnings?: string[];
+}
+
+/** Explicit "this source is not supported here" state — never a silent fallback. */
+export interface UnsupportedSource {
+  status: "unsupported_source";
+  requested_source: string;
+  actual_source: string | null;
+  supported_sources: string[];
+  reason: string;
+  network_used: boolean;
+  cache_used: boolean;
+  warnings: string[];
+}
+
 export interface MarketSnapshot {
   day: string;
+  provenance: SourceProvenance;
   periods: Record<string, number | string | null>[];
   statuses: SourceStatus[];
   warnings: string[];
+}
+
+export type SourceName = "synthetic" | "sample" | "elexon";
+export type NetworkPolicy = "live_with_cache" | "cache_only" | "live_only";
+
+/** An API error that preserves the HTTP status and any structured `detail`. */
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, detail: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
 }
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
@@ -109,7 +160,16 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    throw new Error(`API ${res.status}: ${text}`);
+    let detail: unknown = text;
+    try {
+      const parsed = JSON.parse(text);
+      detail = parsed?.detail ?? parsed;
+    } catch {
+      /* non-JSON body: keep the raw text */
+    }
+    const msg =
+      typeof detail === "string" ? detail : (detail as { reason?: string })?.reason || text;
+    throw new ApiError(res.status, detail, `API ${res.status}: ${msg}`);
   }
   return res.json() as Promise<T>;
 }
@@ -118,7 +178,6 @@ export interface OptimiseRequest {
   config?: BatteryConfig;
   day: string;
   source: string;
-  offline?: boolean;
   streams?: Record<string, boolean>;
   mode?: string;
   risk_aversion?: number;
@@ -130,8 +189,10 @@ export interface OptimiseRequest {
 export const api = {
   health: () => jsonFetch<{ status: string; version: string }>("/api/health"),
   defaultConfig: () => jsonFetch<BatteryConfig>("/api/config/default"),
-  snapshot: (day: string, offline = false) =>
-    jsonFetch<MarketSnapshot>(`/api/market/snapshot?day=${day}&offline=${offline}`),
+  snapshot: (day: string, source: SourceName = "synthetic", networkPolicy: NetworkPolicy = "live_with_cache") =>
+    jsonFetch<MarketSnapshot>(
+      `/api/market/snapshot?day=${day}&source=${source}&network_policy=${networkPolicy}`,
+    ),
   dataStatus: () => jsonFetch<{ offline: boolean; sources: unknown[] }>("/api/market/status"),
   optimise: (req: OptimiseRequest) =>
     jsonFetch<{ result: OptimisationResult; source: string; snapshot: MarketSnapshot | null }>(
@@ -144,12 +205,19 @@ export const api = {
       "/api/scenario",
       { method: "POST", body: JSON.stringify(req) },
     ),
-  backtest: (req: { config?: BatteryConfig; days: number; up_availability_price?: number; down_availability_price?: number }) =>
+  backtest: (req: {
+    config?: BatteryConfig;
+    days: number;
+    source?: string;
+    up_availability_price?: number;
+    down_availability_price?: number;
+  }) =>
     jsonFetch<{
       table: Record<string, number | string>[];
       perfect_foresight_pnl_gbp: number;
       leakage_audit: { check: string; ok: boolean; detail: string }[];
       equity_curve: { index: number; cumulative_pnl: number }[];
+      provenance: SourceProvenance;
     }>("/api/backtest", { method: "POST", body: JSON.stringify(req) }),
   forecastValidate: (req: { days: number; models: string[]; n_splits?: number }) =>
     jsonFetch<{ reports: ForecastReport[] }>("/api/forecast/validate", {
@@ -185,6 +253,62 @@ export interface ProposedPeriod {
   expected_pnl_gbp: number;
 }
 
+export interface ModelRecommendation {
+  energy_action: "CHARGE" | "DISCHARGE" | "IDLE";
+  charge_mw: number;
+  discharge_mw: number;
+  expected_immediate_pnl_gbp: number;
+  expected_horizon_pnl_gbp: number;
+  expected_soc_after_mwh: number;
+  explanation: string;
+  binding_constraints: string[];
+  forecast_price: number;
+  issued_at: string;
+  information_cutoff: string;
+  forecast_vintage_step: number;
+}
+
+export interface TraderInstruction {
+  decision: "ACCEPT_RECOMMENDATION" | "MODIFY" | "REJECT_TO_IDLE";
+  charge_mw: number;
+  discharge_mw: number;
+  reason: string | null;
+  decided_at: string;
+  actor: string | null;
+  source: "manual_ui" | "automatic_policy" | "imported_instruction";
+}
+
+export interface ExecutionRecord {
+  status: "pending" | "simulated" | "confirmed" | "partially_filled" | "rejected";
+  requested_charge_mw: number;
+  requested_discharge_mw: number;
+  executed_charge_mw: number;
+  executed_discharge_mw: number;
+  executed_energy_mwh: number;
+  unfilled_mwh: number;
+  buy_price: number | null;
+  sell_price: number | null;
+  spread_slippage_cost_gbp: number | null;
+  fee_cost_gbp: number | null;
+  execution_source: string;
+}
+
+export interface PhysicalStateRecord {
+  soc_before_mwh: number;
+  model_expected_soc_after_mwh: number;
+  executed_implied_soc_after_mwh: number;
+  confirmed_soc_after_mwh: number;
+  soc_source:
+    | "telemetry"
+    | "meter_reconciliation"
+    | "manual_confirmation"
+    | "executed_action_estimate"
+    | "model_simulation";
+  confirmed_at: string | null;
+  reconciliation_difference_mwh: number;
+  status: "estimated" | "confirmed" | "stale" | "inconsistent";
+}
+
 export interface DecisionRecord {
   step: number;
   settlement_date: string;
@@ -195,6 +319,10 @@ export interface DecisionRecord {
   as_of: string;
   information_cutoff: string;
   basis_max_published_at: string | null;
+  recommendation?: ModelRecommendation | null;
+  trader_instruction?: TraderInstruction | null;
+  execution?: ExecutionRecord | null;
+  physical_state?: PhysicalStateRecord | null;
   n_input_observations: number;
   n_input_forecasts: number;
   horizon_hours: number;
@@ -278,6 +406,7 @@ export interface ReplayStatus {
   n_periods: number;
   step_index: number;
   complete: boolean;
+  state?: string; // trader-in-the-loop state machine
   soc_mwh: number;
   next_settlement_period: number | null;
   next_period_start_utc: string | null;
@@ -286,6 +415,12 @@ export interface ReplayStatus {
   execution_assumption: string;
   decisions?: DecisionRecord[];
   new_decisions?: DecisionRecord[];
+  // Trader-in-the-loop stage payloads
+  recommendation?: ModelRecommendation | null;
+  proposed_schedule?: ProposedPeriod[];
+  trader_instruction?: TraderInstruction | null;
+  execution?: ExecutionRecord | null;
+  decision?: DecisionRecord | null;
 }
 
 export interface VintageRow {
@@ -499,6 +634,8 @@ export interface ValidationResult {
   price: {
     variable: string;
     framing_note: string;
+    /** Models for which the (capped) economic strategy replay was actually run. */
+    strategy_pnl_models: string[];
     table: ValidationModelRow[];
     metric_guide: Record<string, { unit: string; better: string; means: string }>;
     start_of_day_series: Record<
@@ -546,6 +683,32 @@ export const replayApi = {
     ),
   live: (req: { config?: BatteryConfig; source: string; horizon_hours?: number }) =>
     jsonFetch<LiveResult>("/api/live/optimise", { method: "POST", body: JSON.stringify(req) }),
+  // Trader-in-the-loop stages
+  recommend: (replay_id: string) =>
+    jsonFetch<ReplayStatus>("/api/replay/recommend", {
+      method: "POST",
+      body: JSON.stringify({ replay_id }),
+    }),
+  traderDecision: (req: {
+    replay_id: string;
+    decision: string;
+    charge_mw?: number;
+    discharge_mw?: number;
+    reason?: string | null;
+    actor?: string;
+  }) => jsonFetch<ReplayStatus>("/api/replay/trader-decision", { method: "POST", body: JSON.stringify(req) }),
+  execute: (replay_id: string) =>
+    jsonFetch<ReplayStatus>("/api/replay/execute", { method: "POST", body: JSON.stringify({ replay_id }) }),
+  confirmState: (req: {
+    replay_id: string;
+    executed_charge_mw?: number | null;
+    executed_discharge_mw?: number | null;
+    confirmed_soc_after_mwh?: number | null;
+    soc_source?: string;
+    execution_source?: string | null;
+  }) => jsonFetch<ReplayStatus>("/api/replay/confirm-state", { method: "POST", body: JSON.stringify(req) }),
+  advanceGate: (replay_id: string) =>
+    jsonFetch<ReplayStatus>("/api/replay/advance", { method: "POST", body: JSON.stringify({ replay_id }) }),
   attribution: (replay_id: string) =>
     jsonFetch<AttributionResult>(`/api/replay/${replay_id}/attribution`),
   alternatives: (replay_id: string, step: number) =>
@@ -595,6 +758,8 @@ export const KIND_COLOR: Record<DataKind, string> = {
   estimated: "#f59e0b",
   assumption: "#f472b6",
   synthetic: "#64748b",
+  missing: "#ef4444",
+  cached: "#14b8a6",
 };
 
 export const ACTION_COLOR: Record<ActionLabel, string> = {

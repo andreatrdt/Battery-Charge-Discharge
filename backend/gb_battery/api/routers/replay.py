@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from gb_battery.battery.config import BatteryConfig
 from gb_battery.replay.alternatives import decision_alternatives
+from gb_battery.replay.decision_state import TraderLoopError
 from gb_battery.replay.engine import (
     EXECUTION_ASSUMPTION,
     ReplayEngine,
@@ -37,12 +38,15 @@ from gb_battery.replay.forecaster import ForecastVintage
 from gb_battery.replay.metrics import (
     attribution,
     compare_replay_strategies,
+    immediate_counterfactuals,
+    intervention_metrics,
     price_error_heatmap,
     regime_analysis,
     trader_metrics,
 )
 from gb_battery.replay.persistence import get_archive
 from gb_battery.replay.pit import _utc
+from gb_battery.replay.recovery import recover_engine
 from gb_battery.replay.session import REGISTRY, ReplaySession
 from gb_battery.settlement import LONDON
 
@@ -103,15 +107,63 @@ def _options_from(req: ReplayStartRequest | LiveOptimiseRequest, live: bool) -> 
     )
 
 
-def _get_session(replay_id: str) -> ReplaySession:
-    session = REGISTRY.get(replay_id)
-    if session is None:
-        raise HTTPException(
-            404,
-            f"Unknown live replay '{replay_id}'. Completed runs may be archived — "
-            f"try GET /api/replay/runs and GET /api/replay/{replay_id} (read-only).",
-        )
+def _attach_audit(session: ReplaySession) -> ReplaySession:
+    """Persist session metadata and append every transition to the audit log."""
+    archive = get_archive()
+    eng = session.engine
+    _save_metadata(session)
+
+    def _on_transition(transition: str, step: int, data: dict) -> None:
+        archive.append_transition(session.replay_id, transition, step, data)
+        # Refresh the run snapshot after each committed gate so a restart
+        # recovers both the audit trail and the latest summary.
+        if transition in ("PHYSICAL_STATE_CONFIRMATION", "ADVANCE"):
+            _archive_session(session)
+
+    eng.on_transition = _on_transition
     return session
+
+
+def _save_metadata(session: ReplaySession) -> None:
+    """Write the run document early so recovery knows options/config."""
+    eng = session.engine
+    get_archive().save(
+        replay_id=session.replay_id,
+        created_at=session.created_at,
+        mode=session.mode,
+        day=eng.day.isoformat(),
+        n_days=eng.options.n_days,
+        complete=False,
+        options=eng.options.model_dump(mode="json"),
+        config=eng.config.model_dump(mode="json"),
+        versions=eng.versions,
+        summary=eng.realised_summary(),
+        decisions=[d.model_dump(mode="json") for d in eng.decisions],
+        vintages=[],
+        metrics=None,
+    )
+
+
+def _get_session(replay_id: str) -> ReplaySession:
+    """Return the live session, recovering a persisted one after a restart."""
+    session = REGISTRY.get(replay_id)
+    if session is not None:
+        return session
+    # Not in memory: rebuild from the append-only transition log if possible.
+    recovered = recover_engine(replay_id)
+    if recovered is not None:
+        engine, meta = recovered
+        session = REGISTRY.adopt(replay_id, engine, mode=meta["mode"])
+        engine.warnings.append(
+            f"Session recovered after restart: replayed {meta['transitions_applied']} of "
+            f"{meta['transitions_in_log']} logged transitions; state {meta['recovered_state']}."
+        )
+        return _attach_audit(session)
+    raise HTTPException(
+        404,
+        f"Unknown replay '{replay_id}'. Completed runs may be archived — "
+        f"try GET /api/replay/runs and GET /api/replay/{replay_id} (read-only).",
+    )
 
 
 def _vintage_payload(v: ForecastVintage, idx: int, n_vintages: int) -> dict:
@@ -166,13 +218,21 @@ def _status_payload(session: ReplaySession, now: datetime | None = None) -> dict
         "n_periods": n,
         "step_index": eng.step_index,
         "complete": complete,
+        "state": eng.state.value,  # trader-in-the-loop state machine
         "soc_mwh": round(eng.soc, 4),
         "next_settlement_period": next_per.settlement_period if next_per else None,
         "next_period_start_utc": next_per.start_utc.isoformat() if next_per else None,
         "summary": eng.realised_summary(),
-        "warnings": eng.warnings,
+        "warnings": eng.warnings + _persistence_warnings(),
+        "persistence_available": get_archive().available,
         "execution_assumption": EXECUTION_ASSUMPTION,
     }
+
+
+def _persistence_warnings() -> list[str]:
+    """Surface a disabled archive rather than silently losing the audit trail."""
+    archive = get_archive()
+    return [] if archive.available else [archive.unavailable_reason or "Persistence unavailable."]
 
 
 def _archive_session(session: ReplaySession, metrics: dict | None = None) -> None:
@@ -217,7 +277,7 @@ def replay_start(req: ReplayStartRequest) -> dict:
             f"Could not build the point-in-time store from '{req.source}': {exc}. "
             "The 'sample' and 'synthetic' sources work offline.",
         ) from exc
-    session = REGISTRY.create(engine, mode="historical")
+    session = _attach_audit(REGISTRY.create(engine, mode="historical"))
     if req.auto_run:
         engine.run()
         _archive_session(session)
@@ -248,6 +308,119 @@ def replay_run(req: ReplayRunRequest) -> dict:
     return payload
 
 
+# ------------------------------------------------------ trader-in-the-loop
+
+class TraderDecisionRequest(BaseModel):
+    replay_id: str
+    decision: str  # ACCEPT_RECOMMENDATION | MODIFY | REJECT_TO_IDLE
+    charge_mw: float = 0.0
+    discharge_mw: float = 0.0
+    reason: str | None = None
+    actor: str | None = "manual trader"
+
+
+class ExecuteRequest(BaseModel):
+    replay_id: str
+    execution_source: str | None = None
+
+
+class ConfirmStateRequest(BaseModel):
+    replay_id: str
+    executed_charge_mw: float | None = None
+    executed_discharge_mw: float | None = None
+    confirmed_soc_after_mwh: float | None = None
+    soc_source: str = "manual_confirmation"
+    execution_source: str | None = None
+
+
+def _recommendation_payload(session: ReplaySession) -> dict:
+    eng = session.engine
+    pending = eng._pending  # noqa: SLF001 — same-package controller access
+    rec = pending.recommendation if pending else None
+    return {
+        "recommendation": rec.model_dump(mode="json") if rec else None,
+        "proposed_schedule": [p.model_dump(mode="json") for p in pending.proposed] if pending else [],
+    }
+
+
+@router.post("/replay/recommend")
+def replay_recommend(req: ReplayRunRequest) -> dict:
+    """Stage 1 (manual): produce the optimiser's advisory recommendation."""
+    session = _get_session(req.replay_id)
+    try:
+        rec = session.engine.recommend()
+    except TraderLoopError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    payload = _status_payload(session)
+    if rec is None:
+        payload["recommendation"] = None
+        payload["proposed_schedule"] = []
+    else:
+        payload.update(_recommendation_payload(session))
+    return payload
+
+
+@router.post("/replay/trader-decision")
+def replay_trader_decision(req: TraderDecisionRequest) -> dict:
+    """Stage 2 (manual): accept, modify or reject the recommendation."""
+    session = _get_session(req.replay_id)
+    try:
+        instr = session.engine.submit_trader_instruction(
+            req.decision, charge_mw=req.charge_mw, discharge_mw=req.discharge_mw,
+            reason=req.reason, actor=req.actor, source="manual_ui",
+        )
+    except TraderLoopError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    payload = _status_payload(session)
+    payload["trader_instruction"] = instr.model_dump(mode="json")
+    return payload
+
+
+@router.post("/replay/execute")
+def replay_execute(req: ExecuteRequest) -> dict:
+    """Stage 3 (manual): simulate the fill of the trader instruction."""
+    session = _get_session(req.replay_id)
+    try:
+        execution = session.engine.apply_execution(execution_source=req.execution_source)
+    except TraderLoopError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    payload = _status_payload(session)
+    payload["execution"] = execution.model_dump(mode="json")
+    return payload
+
+
+@router.post("/replay/confirm-state")
+def replay_confirm_state(req: ConfirmStateRequest) -> dict:
+    """Stage 4 (manual): reconcile the confirmed physical state and commit."""
+    session = _get_session(req.replay_id)
+    try:
+        record = session.engine.confirm_state(
+            executed_charge_mw=req.executed_charge_mw,
+            executed_discharge_mw=req.executed_discharge_mw,
+            confirmed_soc_after_mwh=req.confirmed_soc_after_mwh,
+            soc_source=req.soc_source,
+            execution_source=req.execution_source,
+        )
+    except TraderLoopError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    payload = _status_payload(session)
+    payload["decision"] = record.model_dump(mode="json")
+    return payload
+
+
+@router.post("/replay/advance")
+def replay_advance(req: ReplayRunRequest) -> dict:
+    """Stage 5 (manual): move to the next gate once the state is resolved."""
+    session = _get_session(req.replay_id)
+    try:
+        session.engine.advance()
+    except TraderLoopError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if session.engine.is_complete():
+        _archive_session(session)
+    return _status_payload(session)
+
+
 @router.get("/replay/runs")
 def replay_runs(limit: int = Query(default=25, ge=1, le=100)) -> dict:
     """Archived (restart-surviving) replay runs."""
@@ -262,6 +435,13 @@ def replay_status(replay_id: str) -> dict:
     stored = get_archive().load(replay_id)
     if stored is None:
         raise HTTPException(404, f"Unknown replay '{replay_id}'.")
+    # An unfinished run is resumable: rebuild it from the append-only audit log
+    # so a restart returns the live state machine, not a read-only snapshot.
+    if not stored.get("complete"):
+        try:
+            return _status_payload(_get_session(replay_id))
+        except HTTPException:
+            pass  # fall through to the archived, read-only view
     return {
         "replay_id": replay_id,
         "mode": stored["mode"],
@@ -370,6 +550,8 @@ def replay_metrics(replay_id: str) -> dict:
     comparison["attribution"] = attribution(eng.decisions)
     comparison["regimes"] = regime_analysis(eng.decisions)
     comparison["price_heatmap"] = price_error_heatmap(eng)
+    comparison["intervention_metrics"] = intervention_metrics(eng.decisions)
+    comparison["counterfactuals"] = immediate_counterfactuals(eng.decisions)
     # Leakage audit: prove every decision's inputs predate its gate.
     audit = []
     for d in eng.decisions:

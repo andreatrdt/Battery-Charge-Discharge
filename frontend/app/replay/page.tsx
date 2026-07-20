@@ -18,11 +18,13 @@ import { BatteryVisual } from "../components/BatteryVisual";
 import { MarketTimeline } from "../components/MarketTimeline";
 import { InfoTip, Learn, ProvBadge } from "../components/learn";
 import { Disclaimer, ErrorNote, Panel, Spinner, Stat } from "../components/ui";
+import { TraderLoop } from "./TraderLoop";
 
-type Mode = "historical" | "live" | "perfect";
+type Mode = "historical" | "trader" | "live" | "perfect";
 
 const MODE_LABELS: Record<Mode, string> = {
-  historical: "Historical Replay",
+  historical: "Historical Replay (automatic)",
+  trader: "Trader-in-the-loop",
   live: "Live Paper Trading",
   perfect: "Perfect Foresight Benchmark",
 };
@@ -58,9 +60,11 @@ function xLabel(dateIso: string, sp: number, firstDate: string): string {
 }
 
 export default function ReplayPage() {
-  const { config, day, setDay } = useAppState();
+  const { config, day, setDay, source: appSource, setSource: setAppSource } = useAppState();
   const [mode, setMode] = useState<Mode>("historical");
-  const [source, setSource] = useState("sample");
+  // Honour the single global source (header selector); no page-local source.
+  const source = appSource;
+  const setSource = (s: string) => setAppSource(s as typeof appSource);
   const [strategy, setStrategy] = useState("rolling_forecast");
   const [horizonHours, setHorizonHours] = useState(48);
   const [nDays, setNDays] = useState(1);
@@ -269,7 +273,7 @@ export default function ReplayPage() {
         </Disclaimer>
       )}
 
-      {mode !== "perfect" && (
+      {mode !== "perfect" && mode !== "trader" && (
         <Disclaimer>
           <strong>Sign convention &amp; execution assumption.</strong> P&amp;L positive = revenue;
           charging cost is negative P&amp;L. Execution is <em>simulated</em> against the MID
@@ -281,8 +285,10 @@ export default function ReplayPage() {
         </Disclaimer>
       )}
 
-      {error && <ErrorNote error={error} />}
-      {loading && <Spinner label={loading} />}
+      {mode === "trader" && <TraderLoop config={config} day={day} source={source} />}
+
+      {mode !== "trader" && error && <ErrorNote error={error} />}
+      {mode !== "trader" && loading && <Spinner label={loading} />}
 
       {mode === "historical" && (
         <HistoricalControls

@@ -20,6 +20,8 @@ class DataKind(StrEnum):
     ESTIMATED = "estimated"  # derived/modelled proxy where no observation exists
     ASSUMPTION = "assumption"  # a user-supplied or default assumption
     SYNTHETIC = "synthetic"  # generated demo/scenario data, not from any market
+    MISSING = "missing"  # the source was requested but returned no usable data
+    CACHED = "cached"  # served from a local cache of a previously-fetched source
 
 
 class QualityStatus(StrEnum):

@@ -6,7 +6,8 @@ stored runs remain interpretable after the code moves on.
 
 from __future__ import annotations
 
-STRATEGY_VERSION = "2.0"  # rolling execute-one-period loop, cross-day horizon
+STRATEGY_VERSION = "2.1"  # + trader-in-the-loop decision hierarchy (recommend→execute→confirm)
+PERSISTENCE_SCHEMA_VERSION = "2"  # DuckDB stores JSON docs; old flat runs still load
 FORECAST_MODEL_VERSION = "1.1"  # baseline + intraday EWMA bias + quantiles, multi-day
 OPTIMISER_VERSION = "1.0"  # Pyomo MILP, HiGHS, wholesale-only replay streams
 EXECUTION_MODEL_VERSION = "1.0"  # ideal / simple / stress reference-price models

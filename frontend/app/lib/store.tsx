@@ -24,15 +24,20 @@ export const DEFAULT_CONFIG: BatteryConfig = {
   downward_service_duration_h: 1,
 };
 
+export type SourceName = "synthetic" | "sample" | "elexon";
+export type NetworkPolicy = "live_with_cache" | "cache_only" | "live_only";
+
 export interface AppState {
   config: BatteryConfig;
   setConfig: (c: BatteryConfig) => void;
   day: string;
   setDay: (d: string) => void;
-  source: string;
-  setSource: (s: string) => void;
-  offline: boolean;
-  setOffline: (o: boolean) => void;
+  /** The single global data source honoured by every page. */
+  source: SourceName;
+  setSource: (s: SourceName) => void;
+  /** Network policy for the Elexon source only (synthetic/sample never fetch). */
+  networkPolicy: NetworkPolicy;
+  setNetworkPolicy: (p: NetworkPolicy) => void;
   /** Learning mode changes explanation density only — never calculations. */
   learning: boolean;
   setLearning: (l: boolean) => void;
@@ -43,8 +48,8 @@ const Ctx = createContext<AppState | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<BatteryConfig>(DEFAULT_CONFIG);
   const [day, setDay] = useState("2025-01-15");
-  const [source, setSource] = useState("synthetic");
-  const [offline, setOffline] = useState(false);
+  const [source, setSource] = useState<SourceName>("synthetic");
+  const [networkPolicy, setNetworkPolicy] = useState<NetworkPolicy>("live_with_cache");
   const [learning, setLearning] = useState(true);
 
   useEffect(() => {
@@ -55,7 +60,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (s.config) setConfig(s.config);
         if (s.day) setDay(s.day);
         if (s.source) setSource(s.source);
-        if (typeof s.offline === "boolean") setOffline(s.offline);
+        if (s.networkPolicy) setNetworkPolicy(s.networkPolicy);
         if (typeof s.learning === "boolean") setLearning(s.learning);
       }
     } catch {
@@ -66,15 +71,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     localStorage.setItem(
       "gbb_state",
-      JSON.stringify({ config, day, source, offline, learning }),
+      JSON.stringify({ config, day, source, networkPolicy, learning }),
     );
-  }, [config, day, source, offline, learning]);
+  }, [config, day, source, networkPolicy, learning]);
 
   return (
     <Ctx.Provider
       value={{
         config, setConfig, day, setDay, source, setSource,
-        offline, setOffline, learning, setLearning,
+        networkPolicy, setNetworkPolicy, learning, setLearning,
       }}
     >
       {children}

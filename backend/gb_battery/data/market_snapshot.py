@@ -39,6 +39,24 @@ class MarketSnapshot:
     frame: pd.DataFrame  # per-period wide frame
     statuses: list[SourceStatus] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Provenance (unified source model). ``day`` above == ``actual_data_day``.
+    requested_source: str = "elexon"
+    actual_source: str = "elexon"
+    requested_day: date | None = None
+    network_used: bool = False
+    cache_used: bool = False
+
+    def provenance(self) -> dict:
+        """Source/network/cache/date provenance for the API and UI."""
+        return {
+            "requested_source": self.requested_source,
+            "actual_source": self.actual_source,
+            "requested_day": (self.requested_day or self.day).isoformat(),
+            "actual_data_day": self.day.isoformat(),
+            "date_substituted": (self.requested_day or self.day) != self.day,
+            "network_used": self.network_used,
+            "cache_used": self.cache_used,
+        }
 
     def to_optimisation_inputs(
         self,
@@ -134,34 +152,110 @@ def _synthetic_frame(day: date) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+MARKET_COLUMNS = [
+    "wholesale_price",
+    "system_price",
+    "demand_forecast_mw",
+    "wind_forecast_mw",
+    "solar_forecast_mw",
+]
+
+
 def build_market_snapshot(
     day: date,
+    source: str = "elexon",
+    *,
+    network_policy: str = "live_with_cache",
     settings: DataSettings | None = None,
     client: ElexonClient | None = None,
     cache: ParquetCache | None = None,
 ) -> MarketSnapshot:
-    """Build a per-period market snapshot with per-source resilience."""
+    """Build a per-period market snapshot for one explicit source.
+
+    ``source`` is one of ``synthetic`` | ``sample`` | ``elexon`` and is honoured
+    exactly: synthetic and sample never touch the network; Elexon failures are
+    reported (never silently replaced with synthetic values). ``network_policy``
+    (``live_with_cache`` | ``cache_only`` | ``live_only``) applies only to the
+    Elexon source. The returned snapshot always states its true provenance.
+    """
     settings = settings or get_settings()
-    statuses: list[SourceStatus] = []
+    # Back-compat: a caller that set the legacy ``offline`` flag and asked for
+    # Elexon gets synthetic (the old offline behaviour) — an explicit
+    # synthetic/sample source is unaffected by the flag.
+    if settings.offline and source == "elexon":
+        source = "synthetic"
+
+    if source == "synthetic":
+        return _synthetic_snapshot(day)
+    if source == "sample":
+        return _sample_snapshot(day)
+    if source == "elexon":
+        return _elexon_snapshot(day, network_policy, settings, client, cache)
+    raise ValueError(f"Unknown source '{source}' (choose synthetic | sample | elexon)")
+
+
+def _synthetic_snapshot(day: date) -> MarketSnapshot:
+    frame = _synthetic_frame(day)
+    statuses = [
+        SourceStatus(name, True, DataKind.SYNTHETIC, "generated")
+        for name in ("wholesale", "system_price", "demand", "wind_solar")
+    ]
+    return MarketSnapshot(
+        day, frame, statuses,
+        warnings=["Synthetic generated data — not from any market source."],
+        requested_source="synthetic", actual_source="synthetic", requested_day=day,
+        network_used=False, cache_used=False,
+    )
+
+
+def _sample_snapshot(day: date) -> MarketSnapshot:
+    from gb_battery.demo.sample_data import load_sample
+
+    hist = load_sample()
+    available = sorted(pd.to_datetime(hist["settlement_date"]).dt.date.unique())
     warnings: list[str] = []
+    actual_day = day
+    if day not in available:
+        actual_day = available[-1]
+        warnings.append(
+            f"Requested day {day.isoformat()} is not in the bundled sample; "
+            f"substituted the nearest available sample day {actual_day.isoformat()}."
+        )
+    rows = hist[pd.to_datetime(hist["settlement_date"]).dt.date == actual_day].copy()
+    keep = ["settlement_period", "start_utc", *MARKET_COLUMNS]
+    for col in MARKET_COLUMNS:
+        if col not in rows.columns:
+            rows[col] = pd.NA
+    frame = rows[keep].sort_values("settlement_period").reset_index(drop=True)
+    statuses = [
+        SourceStatus(name, True, DataKind.SYNTHETIC, "bundled sample")
+        for name in ("wholesale", "system_price", "demand", "wind_solar")
+    ]
+    return MarketSnapshot(
+        actual_day, frame, statuses, warnings,
+        requested_source="sample", actual_source="sample", requested_day=day,
+        network_used=False, cache_used=False,
+    )
 
-    if settings.offline:
-        frame = _synthetic_frame(day)
-        statuses = [
-            SourceStatus("wholesale", True, DataKind.SYNTHETIC, "offline demo"),
-            SourceStatus("system_price", True, DataKind.SYNTHETIC, "offline demo"),
-            SourceStatus("demand", True, DataKind.SYNTHETIC, "offline demo"),
-            SourceStatus("wind_solar", True, DataKind.SYNTHETIC, "offline demo"),
-        ]
-        warnings.append("Offline mode: all series are synthetic demo data.")
-        return MarketSnapshot(day, frame, statuses, warnings)
 
+def _elexon_snapshot(
+    day: date,
+    network_policy: str,
+    settings: DataSettings,
+    client: ElexonClient | None,
+    cache: ParquetCache | None,
+) -> MarketSnapshot:
+    if network_policy not in ("live_with_cache", "cache_only", "live_only"):
+        raise ValueError(f"Unknown network_policy '{network_policy}'")
     client = client or ElexonClient(settings)
     cache = cache or ParquetCache(settings)
     frm = datetime(day.year, day.month, day.day, 0, 0, tzinfo=UTC)
     to = frm.replace(hour=23, minute=59)
+    statuses: list[SourceStatus] = []
+    warnings: list[str] = []
+    net = {"used": False}
+    cch = {"used": False}
 
-    # Start from the DST-correct period grid.
     base = pd.DataFrame(
         {
             "settlement_period": [p.settlement_period for p in settlement_periods_for_day(day)],
@@ -169,58 +263,87 @@ def build_market_snapshot(
         }
     )
 
-    def _merge(df: pd.DataFrame, cols: list[str], source: str, kind: DataKind, retrieved_at):
+    def _series(
+        name: str, cache_key: str, cols: list[str], observed_kind: DataKind, fetch
+    ) -> None:
+        """Fill ``cols`` for one Elexon series honouring the network policy.
+
+        On failure the columns are left null and a failed status is recorded —
+        never silently replaced with synthetic values.
+        """
         nonlocal base
-        keep = ["settlement_period", *cols]
-        base = base.merge(df[keep], on="settlement_period", how="left")
-        statuses.append(SourceStatus(source, True, kind, "live", retrieved_at))
+        df: pd.DataFrame | None = None
+        retrieved_at = None
+        detail = ""
+        used_cache = False
+        if network_policy in ("live_with_cache", "live_only"):
+            try:
+                net["used"] = True
+                df = fetch()
+                retrieved_at = df["retrieved_at"].iloc[0] if "retrieved_at" in df and len(df) else None
+                cache.put(cache_key, day.isoformat(), df, retrieved_at)  # best-effort
+                detail = "live"
+            except Exception as exc:  # noqa: BLE001 — surface, do not substitute
+                detail = f"live fetch failed: {exc}"
+                df = None
+        if df is None and network_policy in ("live_with_cache", "cache_only"):
+            cached = cache.get(cache_key, day.isoformat())
+            if cached is not None and not cached.empty:
+                df = cached
+                used_cache = True
+                cch["used"] = True
+                entry = cache.entry(cache_key, day.isoformat())
+                retrieved_at = entry.retrieved_at if entry else None
+                detail = (detail + "; " if detail else "") + "served from cache"
+        if df is None or df.empty:
+            statuses.append(SourceStatus(name, False, DataKind.MISSING, detail or "unavailable"))
+            warnings.append(f"{name} unavailable ({detail or 'no data'}).")
+            return
+        keep = ["settlement_period", *[c for c in cols if c in df.columns]]
+        base = base.merge(df[keep].drop_duplicates("settlement_period"), on="settlement_period", how="left")
+        kind = DataKind.CACHED if used_cache else observed_kind
+        statuses.append(SourceStatus(name, True, kind, detail, retrieved_at))
 
-    # Wholesale (MID).
-    try:
-        mid = client.market_index_data(frm, to)
-        mid = mid.rename(columns={"mid_price": "wholesale_price"})
-        ts = mid["retrieved_at"].iloc[0] if len(mid) else None
-        _merge(mid, ["wholesale_price"], "wholesale", DataKind.OBSERVED, ts)
-        cache.put("elexon.MID", day.isoformat(), mid, ts)  # best-effort
-    except Exception as exc:  # noqa: BLE001
-        syn = _synthetic_frame(day)
-        base = base.merge(syn[["settlement_period", "wholesale_price"]], on="settlement_period", how="left")
-        statuses.append(SourceStatus("wholesale", False, DataKind.SYNTHETIC, f"fallback: {exc}"))
-        warnings.append(f"Wholesale (MID) unavailable — using synthetic prices ({exc}).")
+    def _mid() -> pd.DataFrame:
+        return client.market_index_data(frm, to).rename(columns={"mid_price": "wholesale_price"})
 
-    # System (imbalance) price.
-    try:
-        sp = client.system_prices(day)
-        sp = sp.rename(columns={"system_sell_price": "system_price"})
-        ts = sp["retrieved_at"].iloc[0] if len(sp) else None
-        _merge(sp, ["system_price"], "system_price", DataKind.OBSERVED, ts)
-        cache.put("elexon.system_prices", day.isoformat(), sp, ts)  # best-effort
-    except Exception as exc:  # noqa: BLE001
-        statuses.append(SourceStatus("system_price", False, DataKind.ESTIMATED, f"fallback: {exc}"))
-        warnings.append(f"System price unavailable ({exc}).")
+    def _sys() -> pd.DataFrame:
+        return client.system_prices(day).rename(columns={"system_sell_price": "system_price"})
 
-    # Demand forecast.
-    try:
-        dem = client.demand_forecast(frm, to)
-        dem = dem.rename(columns={"national_demand_forecast_mw": "demand_forecast_mw"})
-        dem = dem.dropna(subset=["demand_forecast_mw"]).drop_duplicates("settlement_period")
-        _merge(dem, ["demand_forecast_mw"], "demand", DataKind.FORECAST, dem["retrieved_at"].iloc[0] if len(dem) else None)
-    except Exception as exc:  # noqa: BLE001
-        statuses.append(SourceStatus("demand", False, DataKind.ESTIMATED, f"fallback: {exc}"))
-        warnings.append(f"Demand forecast unavailable ({exc}).")
+    def _dem() -> pd.DataFrame:
+        d = client.demand_forecast(frm, to).rename(
+            columns={"national_demand_forecast_mw": "demand_forecast_mw"}
+        )
+        return d.dropna(subset=["demand_forecast_mw"]).drop_duplicates("settlement_period")
 
-    # Wind & solar forecast.
-    try:
-        ws = client.wind_solar_forecast(frm, to).drop_duplicates("settlement_period")
-        _merge(ws, ["wind_forecast_mw", "solar_forecast_mw"], "wind_solar", DataKind.FORECAST,
-               ws["retrieved_at"].iloc[0] if len(ws) else None)
-    except Exception as exc:  # noqa: BLE001
-        statuses.append(SourceStatus("wind_solar", False, DataKind.ESTIMATED, f"fallback: {exc}"))
-        warnings.append(f"Wind/solar forecast unavailable ({exc}).")
+    def _ws() -> pd.DataFrame:
+        return client.wind_solar_forecast(frm, to).drop_duplicates("settlement_period")
 
-    # Ensure expected columns exist.
-    for col in ["wholesale_price", "system_price", "demand_forecast_mw", "wind_forecast_mw", "solar_forecast_mw"]:
+    _series("wholesale", "elexon.MID", ["wholesale_price"], DataKind.OBSERVED, _mid)
+    _series("system_price", "elexon.system_prices", ["system_price"], DataKind.OBSERVED, _sys)
+    _series("demand", "elexon.demand_forecast", ["demand_forecast_mw"], DataKind.FORECAST, _dem)
+    _series(
+        "wind_solar", "elexon.wind_solar", ["wind_forecast_mw", "solar_forecast_mw"],
+        DataKind.FORECAST, _ws,
+    )
+
+    for col in MARKET_COLUMNS:
         if col not in base.columns:
             base[col] = pd.NA
 
-    return MarketSnapshot(day, base, statuses, warnings)
+    # If the essential wholesale series is entirely absent, the whole snapshot is
+    # not usable — signal a clear upstream failure rather than an empty frame.
+    if base["wholesale_price"].isna().all():
+        from gb_battery.data.http import DataSourceError
+
+        raise DataSourceError(
+            "Elexon wholesale (MID) data is unavailable and no cached copy exists "
+            f"for {day.isoformat()} under policy '{network_policy}'. "
+            + (" ".join(warnings) if warnings else "")
+        )
+
+    return MarketSnapshot(
+        day, base, statuses, warnings,
+        requested_source="elexon", actual_source="elexon", requested_day=day,
+        network_used=net["used"], cache_used=cch["used"],
+    )

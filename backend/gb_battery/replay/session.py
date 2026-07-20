@@ -34,6 +34,13 @@ class SessionRegistry:
 
     def create(self, engine: ReplayEngine, mode: str) -> ReplaySession:
         session = ReplaySession(replay_id=uuid.uuid4().hex[:12], engine=engine, mode=mode)
+        return self._register(session)
+
+    def adopt(self, replay_id: str, engine: ReplayEngine, mode: str) -> ReplaySession:
+        """Re-register a session recovered from storage under its original id."""
+        return self._register(ReplaySession(replay_id=replay_id, engine=engine, mode=mode))
+
+    def _register(self, session: ReplaySession) -> ReplaySession:
         with self._lock:
             self._sessions[session.replay_id] = session
             while len(self._sessions) > self._max:

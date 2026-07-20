@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pandas as pd
-
 from gb_battery.data.market_snapshot import MarketSnapshot, build_market_snapshot
 from gb_battery.data.settings import DataSettings
 from gb_battery.demo.sample_data import sample_day
@@ -82,21 +80,19 @@ def build_inputs_for_day(
         return _inputs_from_sample(day, streams), None
     if source == "elexon":
         settings = DataSettings(offline=offline)
-        snap = build_market_snapshot(day, settings=settings)
+        snap = build_market_snapshot(day, source="elexon", settings=settings)
         return snap.to_optimisation_inputs(revenue_streams=streams), snap
     raise ValueError(f"Unknown source '{source}' (choose from {SOURCES})")
 
 
 def snapshot_to_payload(snap: MarketSnapshot) -> dict:
-    """Serialise a MarketSnapshot for the API."""
-    frame = snap.frame.copy()
-    # Convert timestamps to ISO strings for JSON.
-    for col in frame.columns:
-        if pd.api.types.is_datetime64_any_dtype(frame[col]):
-            frame[col] = frame[col].astype(str)
+    """Serialise a MarketSnapshot for the API (JSON-safe: no NaN/Inf/NaT)."""
+    from gb_battery.data.serialize import frame_to_records
+
     return {
         "day": snap.day.isoformat(),
-        "periods": frame.where(pd.notna(frame), None).to_dict(orient="records"),
+        "provenance": snap.provenance(),
+        "periods": frame_to_records(snap.frame),
         "statuses": [
             {
                 "source": s.source,

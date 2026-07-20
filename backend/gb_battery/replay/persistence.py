@@ -1,13 +1,19 @@
-"""DuckDB persistence for completed replay runs.
+"""DuckDB persistence for replay runs and their append-only audit trail.
 
-A backend restart must not destroy completed research runs. On completion (or
-whenever the API asks), the full run — options, config, versions, decisions,
-forecast vintages and computed metrics — is written to
-``<cache_dir>/replays.duckdb`` as JSON documents keyed by ``replay_id``.
+Two complementary stores, both in ``<cache_dir>/replays.duckdb``:
 
-Restored runs are read-only: status, decisions, forecasts and cached metrics
-are served from storage. Endpoints that need live re-solves (alternatives,
-fresh benchmark runs) require a live session and say so.
+* ``replay_runs`` — a snapshot document per run (options, config, versions,
+  decisions, vintages, metrics). Written when a session is created and
+  refreshed as it progresses, so a completed run survives a restart.
+* ``replay_transitions`` — the **append-only audit trail**. Every state
+  transition of the trader-in-the-loop machine (recommendation, trader
+  instruction, execution, physical-state confirmation, advance/supersession) is
+  appended with a monotonic sequence number and never updated or deleted.
+
+The transition log is what makes an *active* (mid-flight) session recoverable:
+because every stage is deterministic given its recorded inputs, replaying the
+log rebuilds the engine exactly — including the in-progress gate — after a
+process restart. Historical rows are never mutated; recovery only reads them.
 """
 
 from __future__ import annotations
@@ -36,17 +42,104 @@ CREATE TABLE IF NOT EXISTS replay_runs (
     decisions_json  VARCHAR,
     vintages_json   VARCHAR,
     metrics_json    VARCHAR
-)
+);
+CREATE TABLE IF NOT EXISTS replay_transitions (
+    replay_id       VARCHAR,
+    seq             INTEGER,
+    at_utc          TIMESTAMPTZ,
+    transition      VARCHAR,
+    step            INTEGER,
+    data_json       VARCHAR,
+    PRIMARY KEY (replay_id, seq)
+);
 """
 
 
 class ReplayArchive:
+    """Best-effort archive. Persistence must never break a running replay.
+
+    DuckDB allows a single writer process per file, so a second backend (or a
+    stale one) can legitimately fail to open the database. In that case the
+    archive degrades to a disabled no-op — replays keep working in memory and
+    ``unavailable_reason`` explains why nothing is being persisted — instead of
+    turning every replay endpoint into a 500.
+    """
+
     def __init__(self, settings: DataSettings | None = None) -> None:
         self.settings = settings or get_settings()
         self._path = str(self.settings.ensure_cache_dir() / "replays.duckdb")
-        con = duckdb.connect(self._path)
-        con.execute(SCHEMA)
-        con.close()
+        self.available = False
+        self.unavailable_reason: str | None = None
+        try:
+            con = duckdb.connect(self._path)
+            try:
+                # Multiple DDL statements: DuckDB executes one per call. Existing
+                # databases simply gain the new table (CREATE ... IF NOT EXISTS).
+                for stmt in filter(None, (s.strip() for s in SCHEMA.split(";"))):
+                    con.execute(stmt)
+            finally:
+                con.close()
+            self.available = True
+        except Exception as exc:  # noqa: BLE001 — degrade, never raise
+            self.unavailable_reason = (
+                f"Replay persistence is disabled: {self._path} could not be opened "
+                f"({exc}). Runs will work in memory but will not survive a restart."
+            )
+
+    # -------------------------------------------------- append-only audit log
+    def append_transition(
+        self, replay_id: str, transition: str, step: int, data: dict, at: datetime | None = None
+    ) -> int:
+        """Append one immutable state transition; returns its sequence number.
+
+        Never updates or deletes an existing row — the log is the audit trail.
+        """
+        if not self.available:
+            return -1
+        try:
+            con = duckdb.connect(self._path)
+            try:
+                row = con.execute(
+                    "SELECT COALESCE(MAX(seq), -1) FROM replay_transitions WHERE replay_id = ?",
+                    [replay_id],
+                ).fetchone()
+                seq = int(row[0]) + 1 if row else 0
+                con.execute(
+                    "INSERT INTO replay_transitions VALUES (?, ?, ?, ?, ?, ?)",
+                    [replay_id, seq, at or datetime.now(tz=UTC), transition, step, json.dumps(data)],
+                )
+                return seq
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001 — audit logging must never break a replay
+            return -1
+
+    def load_transitions(self, replay_id: str) -> list[dict]:
+        """Read the append-only transition log in order."""
+        if not self.available:
+            return []
+        try:
+            con = duckdb.connect(self._path, read_only=True)
+            try:
+                rows = con.execute(
+                    "SELECT seq, at_utc, transition, step, data_json FROM replay_transitions "
+                    "WHERE replay_id = ? ORDER BY seq",
+                    [replay_id],
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001
+            return []
+        return [
+            {
+                "seq": r[0],
+                "at": r[1].isoformat() if r[1] else None,
+                "transition": r[2],
+                "step": r[3],
+                "data": json.loads(r[4]) if r[4] else {},
+            }
+            for r in rows
+        ]
 
     # ------------------------------------------------------------------ write
     def save(
@@ -67,6 +160,8 @@ class ReplayArchive:
         metrics: dict | None = None,
     ) -> bool:
         """Upsert a run; best-effort (returns False instead of raising)."""
+        if not self.available:
+            return False
         try:
             con = duckdb.connect(self._path)
             try:
@@ -97,6 +192,8 @@ class ReplayArchive:
             return False
 
     def update_metrics(self, replay_id: str, metrics: dict) -> None:
+        if not self.available:
+            return
         with contextlib.suppress(Exception):
             con = duckdb.connect(self._path)
             try:
@@ -109,6 +206,8 @@ class ReplayArchive:
 
     # ------------------------------------------------------------------- read
     def load(self, replay_id: str) -> dict | None:
+        if not self.available:
+            return None
         try:
             con = duckdb.connect(self._path, read_only=True)
             try:
@@ -129,6 +228,8 @@ class ReplayArchive:
         return rec
 
     def list_runs(self, limit: int = 50) -> list[dict]:
+        if not self.available:
+            return []
         try:
             con = duckdb.connect(self._path, read_only=True)
             try:
