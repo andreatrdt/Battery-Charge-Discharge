@@ -24,6 +24,11 @@ class ReplaySession:
     engine: ReplayEngine
     mode: str  # "historical" | "live"
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
+    # Guards every mutation of this session's engine. One lock *per session* so
+    # independent replays never block each other; acquired non-blockingly by the
+    # API so a concurrent mutation fails fast with 409 instead of interleaving
+    # and leaving the state machine stranded mid-gate.
+    operation_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class SessionRegistry:

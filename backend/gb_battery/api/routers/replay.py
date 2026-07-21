@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
@@ -166,6 +168,28 @@ def _get_session(replay_id: str) -> ReplaySession:
     )
 
 
+@contextmanager
+def _session_operation(replay_id: str) -> Iterator[ReplaySession]:
+    """Resolve a session and hold its per-session lock for one mutation.
+
+    The lock is acquired **non-blockingly**: a second concurrent mutation of the
+    same session fails fast with 409 rather than queueing behind a long run and
+    interleaving stages (which is what previously stranded the state machine
+    mid-gate). Independent sessions use independent locks and never block each
+    other. ``TraderLoopError`` — an invalid or conflicting transition — is also a
+    409; anything else propagates so a genuine defect still surfaces as 500.
+    """
+    session = _get_session(replay_id)
+    if not session.operation_lock.acquire(blocking=False):
+        raise HTTPException(409, "Replay operation already in progress.")
+    try:
+        yield session
+    except TraderLoopError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    finally:
+        session.operation_lock.release()
+
+
 def _vintage_payload(v: ForecastVintage, idx: int, n_vintages: int) -> dict:
     return {
         "step": idx,
@@ -289,23 +313,33 @@ def replay_start(req: ReplayStartRequest) -> dict:
 
 @router.post("/replay/step")
 def replay_step(req: ReplayStepRequest) -> dict:
-    session = _get_session(req.replay_id)
-    new = session.engine.run(max_steps=req.n_steps)
-    if session.engine.is_complete():
-        _archive_session(session)
-    payload = _status_payload(session)
-    payload["new_decisions"] = [d.model_dump(mode="json") for d in new]
-    return payload
+    """Advance the automatic workflow by ``n_steps`` committed periods.
+
+    Resumes from whatever valid state the session is in, so a request that was
+    cancelled mid-gate does not strand the session.
+    """
+    with _session_operation(req.replay_id) as session:
+        new = session.engine.run(max_steps=req.n_steps)
+        if session.engine.is_complete():
+            _archive_session(session)
+        payload = _status_payload(session)
+        payload["new_decisions"] = [d.model_dump(mode="json") for d in new]
+        return payload
 
 
 @router.post("/replay/run")
 def replay_run(req: ReplayRunRequest) -> dict:
-    session = _get_session(req.replay_id)
-    session.engine.run()
-    _archive_session(session)
-    payload = _status_payload(session)
-    payload["decisions"] = [d.model_dump(mode="json") for d in session.engine.decisions]
-    return payload
+    """Run every remaining period in one request.
+
+    Kept for API compatibility; the UI drives ``/replay/step`` one period at a
+    time so a long replay cannot exceed the dev-proxy timeout.
+    """
+    with _session_operation(req.replay_id) as session:
+        session.engine.run()
+        _archive_session(session)
+        payload = _status_payload(session)
+        payload["decisions"] = [d.model_dump(mode="json") for d in session.engine.decisions]
+        return payload
 
 
 # ------------------------------------------------------ trader-in-the-loop
@@ -346,54 +380,44 @@ def _recommendation_payload(session: ReplaySession) -> dict:
 @router.post("/replay/recommend")
 def replay_recommend(req: ReplayRunRequest) -> dict:
     """Stage 1 (manual): produce the optimiser's advisory recommendation."""
-    session = _get_session(req.replay_id)
-    try:
+    with _session_operation(req.replay_id) as session:
         rec = session.engine.recommend()
-    except TraderLoopError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    payload = _status_payload(session)
-    if rec is None:
-        payload["recommendation"] = None
-        payload["proposed_schedule"] = []
-    else:
-        payload.update(_recommendation_payload(session))
-    return payload
+        payload = _status_payload(session)
+        if rec is None:
+            payload["recommendation"] = None
+            payload["proposed_schedule"] = []
+        else:
+            payload.update(_recommendation_payload(session))
+        return payload
 
 
 @router.post("/replay/trader-decision")
 def replay_trader_decision(req: TraderDecisionRequest) -> dict:
     """Stage 2 (manual): accept, modify or reject the recommendation."""
-    session = _get_session(req.replay_id)
-    try:
+    with _session_operation(req.replay_id) as session:
         instr = session.engine.submit_trader_instruction(
             req.decision, charge_mw=req.charge_mw, discharge_mw=req.discharge_mw,
             reason=req.reason, actor=req.actor, source="manual_ui",
         )
-    except TraderLoopError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    payload = _status_payload(session)
-    payload["trader_instruction"] = instr.model_dump(mode="json")
-    return payload
+        payload = _status_payload(session)
+        payload["trader_instruction"] = instr.model_dump(mode="json")
+        return payload
 
 
 @router.post("/replay/execute")
 def replay_execute(req: ExecuteRequest) -> dict:
     """Stage 3 (manual): simulate the fill of the trader instruction."""
-    session = _get_session(req.replay_id)
-    try:
+    with _session_operation(req.replay_id) as session:
         execution = session.engine.apply_execution(execution_source=req.execution_source)
-    except TraderLoopError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    payload = _status_payload(session)
-    payload["execution"] = execution.model_dump(mode="json")
-    return payload
+        payload = _status_payload(session)
+        payload["execution"] = execution.model_dump(mode="json")
+        return payload
 
 
 @router.post("/replay/confirm-state")
 def replay_confirm_state(req: ConfirmStateRequest) -> dict:
     """Stage 4 (manual): reconcile the confirmed physical state and commit."""
-    session = _get_session(req.replay_id)
-    try:
+    with _session_operation(req.replay_id) as session:
         record = session.engine.confirm_state(
             executed_charge_mw=req.executed_charge_mw,
             executed_discharge_mw=req.executed_discharge_mw,
@@ -401,24 +425,19 @@ def replay_confirm_state(req: ConfirmStateRequest) -> dict:
             soc_source=req.soc_source,
             execution_source=req.execution_source,
         )
-    except TraderLoopError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    payload = _status_payload(session)
-    payload["decision"] = record.model_dump(mode="json")
-    return payload
+        payload = _status_payload(session)
+        payload["decision"] = record.model_dump(mode="json")
+        return payload
 
 
 @router.post("/replay/advance")
 def replay_advance(req: ReplayRunRequest) -> dict:
     """Stage 5 (manual): move to the next gate once the state is resolved."""
-    session = _get_session(req.replay_id)
-    try:
+    with _session_operation(req.replay_id) as session:
         session.engine.advance()
-    except TraderLoopError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    if session.engine.is_complete():
-        _archive_session(session)
-    return _status_payload(session)
+        if session.engine.is_complete():
+            _archive_session(session)
+        return _status_payload(session)
 
 
 @router.get("/replay/runs")

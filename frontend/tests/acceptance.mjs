@@ -66,4 +66,20 @@ ok(market.includes("Commercial position unavailable"), "Market shows explicit un
 const layout = src[join(appDir, "layout.tsx")];
 ok(!/Disclaimer|disclaimer/.test(layout), "layout has no disclaimer footer");
 
+// 5. Trading page: chunked Run-to-end, single-flight guard, Stop, disabled controls.
+const trading = src[join(appDir, "replay", "page.tsx")];
+ok(!/replayApi\.run\b/.test(trading), "Run to end must not call replayApi.run");
+ok(/replayApi\.step\(\s*replayId\s*,\s*1\s*\)/.test(trading), "Run to end steps one period per request");
+ok(/busyRef\s*=\s*useRef\(false\)/.test(trading), "single-flight guard ref exists");
+ok(/if\s*\(\s*busyRef\.current\s*\)\s*return/.test(trading), "single-flight guard short-circuits re-entrant mutations");
+ok(/runCancelRef\s*=\s*useRef\(false\)/.test(trading), "run-loop cancellation ref exists");
+ok(/mountedRef\s*=\s*useRef\(true\)/.test(trading), "unmount guard ref exists");
+ok(/onClick=\{onStop\}/.test(trading) && />\s*Stop\s*</.test(trading), "Stop control exists while running");
+ok(/Running · \{status\.step_index\}\/\{status\.n_periods\}/.test(trading), "compact run progress is rendered");
+for (const handler of ["onStep", "start", "props.onRecommend", "props.onExecute", "props.onConfirm", "props.onAdvance"]) {
+  const re = new RegExp(`onClick=\\{${handler.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\}[\\s\\S]{0,160}?disabled=\\{`);
+  ok(re.test(trading), `${handler} button is disabled while busy`);
+}
+ok(!/Step ▶|Run to end ⏭|Next period →/.test(trading), "no emojis/glyphs on operational buttons");
+
 console.log(`OK — ${checks} frontend acceptance checks passed across ${files.length} files.`);

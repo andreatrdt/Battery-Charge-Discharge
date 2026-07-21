@@ -81,6 +81,10 @@ EXECUTION_ASSUMPTION = (
     "beyond the simple model. MID is a reference price, not an executable bid/ask."
 )
 
+# Upper bound on state transitions one automatic step() may perform. The longest
+# legitimate path (resuming at READY_FOR_NEXT_PERIOD) needs five.
+MAX_AUTOMATIC_TRANSITIONS = 6
+
 
 class ReplayOptions(BaseModel):
     """Configuration of one replay session."""
@@ -880,24 +884,61 @@ class ReplayEngine:
 
     # ------------------------------------------------------------------- step
     def step(self, now: datetime | None = None) -> DecisionRecord | None:
-        """Automatic gate: recommend → auto-accept → simulate → reconcile → advance.
+        """Automatic gate: resume from whatever valid state the session is in.
+
+        A previous request may have stopped between stages (client timeout,
+        cancelled request, or a manual action that part-advanced the gate), so
+        this drives the *current* gate forward from any valid state rather than
+        assuming it starts at ``READY_FOR_RECOMMENDATION``. It commits **at most
+        one** Settlement Period per call and always leaves the session in
+        ``READY_FOR_RECOMMENDATION`` or ``COMPLETE``.
 
         This is exactly the composition the manual API performs, so historical
         replay and validation stay fully automated and reproducible.
         """
         if self.options.live and now is None:
             now = datetime.now(tz=UTC)
-        rec = self.recommend(now)
-        if rec is None:
-            return None
-        gate_at = self._pending.as_of if self._pending else None
-        self.submit_trader_instruction(
-            "ACCEPT_RECOMMENDATION", source="automatic_policy", at=gate_at
+
+        # Worst case is READY_FOR_NEXT_PERIOD: advance → recommend → instruct →
+        # execute → confirm+advance = 5 transitions. The guard turns a
+        # non-converging state machine into a clear error instead of a hang.
+        for _ in range(MAX_AUTOMATIC_TRANSITIONS):
+            state = self.state
+            if state == SessionState.COMPLETE:
+                return None
+            if state == SessionState.READY_FOR_NEXT_PERIOD:
+                self.advance()
+                continue
+            if state == SessionState.READY_FOR_RECOMMENDATION:
+                if self.recommend(now) is None:
+                    return None  # replay complete
+                continue
+            if state == SessionState.AWAITING_TRADER_DECISION:
+                self.submit_trader_instruction(
+                    "ACCEPT_RECOMMENDATION",
+                    source="automatic_policy",
+                    at=self._gate_at(),
+                )
+                continue
+            if state == SessionState.AWAITING_EXECUTION:
+                self.apply_execution()
+                continue
+            if state == SessionState.AWAITING_STATE_CONFIRMATION:
+                record = self.confirm_state(
+                    soc_source="executed_action_estimate", at=self._gate_at()
+                )
+                self.advance()
+                return record
+            raise RuntimeError(f"Unhandled replay session state '{state}'.")
+
+        raise RuntimeError(
+            f"Automatic step did not converge within {MAX_AUTOMATIC_TRANSITIONS} "
+            f"transitions (state {self.state}); refusing to loop."
         )
-        self.apply_execution()
-        record = self.confirm_state(soc_source="executed_action_estimate", at=gate_at)
-        self.advance()
-        return record
+
+    def _gate_at(self) -> datetime | None:
+        """Deterministic gate timestamp for the in-progress period, if any."""
+        return self._pending.as_of if self._pending else None
 
     def run(self, max_steps: int | None = None, now: datetime | None = None) -> list[DecisionRecord]:
         """Step until the replay range (or the live boundary) is exhausted."""

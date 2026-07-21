@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   gbp,
@@ -34,6 +34,14 @@ function signed(x: number | null | undefined, dp = 1): string {
   return x > 0 ? `+${s}` : s;
 }
 
+/** Append newly committed decisions, keyed by settlement date + period. */
+function mergeDecisions(prev: DecisionRecord[], incoming: DecisionRecord[]): DecisionRecord[] {
+  if (!incoming.length) return prev;
+  const seen = new Set(prev.map((d) => `${d.settlement_date}|${d.settlement_period}`));
+  const added = incoming.filter((d) => !seen.has(`${d.settlement_date}|${d.settlement_period}`));
+  return added.length ? [...prev, ...added] : prev;
+}
+
 export default function TradingPage() {
   const { config, day, source } = useAppState();
   const [mode, setMode] = useState<Mode>("manual");
@@ -52,6 +60,21 @@ export default function TradingPage() {
   const [confirmSoc, setConfirmSoc] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+
+  // Single-flight guard: refs, not state, because rapid double-clicks land
+  // before React re-renders and the disabled attribute takes effect.
+  const busyRef = useRef(false);
+  const runCancelRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      runCancelRef.current = true;
+    };
+  }, []);
 
   const replayId = status?.replay_id || null;
   const stage = (status?.state as Stage) || "READY_FOR_RECOMMENDATION";
@@ -86,20 +109,36 @@ export default function TradingPage() {
       .catch(() => {});
   }, [status, source, replayId]);
 
-  const call = useCallback(async (label: string, fn: () => Promise<ReplayStatus>) => {
+  /** One mutation, no guard — used by the run loop which holds the guard itself. */
+  const perform = useCallback(async (label: string, fn: () => Promise<ReplayStatus>) => {
     setLoading(label);
     setError(null);
     try {
       const s = await fn();
+      if (!mountedRef.current) return null;
       setStatus(s);
       return s;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
       return null;
     } finally {
-      setLoading(null);
+      if (mountedRef.current) setLoading(null);
     }
   }, []);
+
+  /** Guarded mutation: a second concurrent replay mutation is dropped. */
+  const call = useCallback(
+    async (label: string, fn: () => Promise<ReplayStatus>) => {
+      if (busyRef.current) return null;
+      busyRef.current = true;
+      try {
+        return await perform(label, fn);
+      } finally {
+        busyRef.current = false;
+      }
+    },
+    [perform],
+  );
 
   const refreshDecisions = useCallback(async (id: string) => {
     const r = await replayApi.decisions(id);
@@ -151,12 +190,56 @@ export default function TradingPage() {
   const onStep = async () => {
     if (!replayId) return;
     const s = await call("Stepping…", () => replayApi.step(replayId, 1));
-    if (s) void refreshDecisions(replayId);
+    if (s) setDecisions((prev) => mergeDecisions(prev, s.new_decisions || []));
   };
-  const onRunAll = async () => {
-    if (!replayId) return;
-    const s = await call("Running to end…", () => replayApi.run(replayId));
-    if (s) void refreshDecisions(replayId);
+
+  /**
+   * Run to end as a controlled sequence of single-period steps. One committed
+   * Settlement Period per request keeps every call well inside the dev-proxy
+   * timeout; the loop yields to the renderer between requests and stops on
+   * completion, error, Stop or unmount.
+   */
+  const onRunAll = useCallback(async () => {
+    if (!replayId || busyRef.current) return;
+    busyRef.current = true;
+    runCancelRef.current = false;
+    setRunning(true);
+    setError(null);
+    try {
+      // Bounded: a settlement day is at most 50 periods (×3 days).
+      for (let guard = 0; guard < 200; guard += 1) {
+        if (runCancelRef.current || !mountedRef.current) break;
+        let s: ReplayStatus;
+        try {
+          s = await replayApi.step(replayId, 1);
+        } catch (e) {
+          if (mountedRef.current) setError(e instanceof Error ? e.message : String(e));
+          break;
+        }
+        if (!mountedRef.current) break;
+        setStatus(s);
+        setDecisions((prev) => mergeDecisions(prev, s.new_decisions || []));
+        if (s.complete) break;
+        // Let React paint the progress before the next request.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) {
+        setRunning(false);
+        setLoading(null);
+      }
+    }
+  }, [replayId]);
+
+  const onStop = () => {
+    runCancelRef.current = true;
+  };
+
+  const changeMode = (m: Mode) => {
+    // Manual input must never race an in-flight automatic run.
+    if (m === "manual") runCancelRef.current = true;
+    setMode(m);
   };
 
   useEffect(() => {
@@ -179,6 +262,8 @@ export default function TradingPage() {
 
   const focus = selected != null ? decisions.find((d) => d.step === selected) || lastDecision : lastDecision;
   const done = ["READY_FOR_RECOMMENDATION", "COMPLETE"].includes(stage);
+  // Any replay mutation in flight (single stage or the run loop).
+  const busy = loading !== null || running;
 
   return (
     <div className="space-y-3">
@@ -186,14 +271,19 @@ export default function TradingPage() {
         <span className="text-sm font-semibold">Trading</span>
         <div className="flex overflow-hidden rounded border border-terminal-border">
           {(["manual", "auto"] as Mode[]).map((m) => (
-            <button key={m} onClick={() => setMode(m)} className={`px-2 py-1 ${mode === m ? "bg-kind-observed/15 text-kind-observed" : "text-terminal-muted"}`}>
+            <button
+              key={m}
+              onClick={() => changeMode(m)}
+              disabled={loading !== null}
+              className={`px-2 py-1 disabled:opacity-40 ${mode === m ? "bg-kind-observed/15 text-kind-observed" : "text-terminal-muted"}`}
+            >
               {m === "manual" ? "Manual" : "Auto"}
             </button>
           ))}
         </div>
         <label className="flex items-center gap-1">
           <span className="text-terminal-muted">Horizon</span>
-          <select value={horizonHours} onChange={(e) => setHorizonHours(parseInt(e.target.value, 10))} className="rounded border border-terminal-border bg-terminal-bg px-1 py-0.5">
+          <select value={horizonHours} onChange={(e) => setHorizonHours(parseInt(e.target.value, 10))} disabled={busy} className="rounded border border-terminal-border bg-terminal-bg px-1 py-0.5 disabled:opacity-40">
             <option value={24}>24h</option>
             <option value={48}>48h</option>
             <option value={72}>72h</option>
@@ -201,23 +291,53 @@ export default function TradingPage() {
         </label>
         <label className="flex items-center gap-1">
           <span className="text-terminal-muted">Execution</span>
-          <select value={executionMode} onChange={(e) => setExecutionMode(e.target.value)} className="rounded border border-terminal-border bg-terminal-bg px-1 py-0.5">
+          <select value={executionMode} onChange={(e) => setExecutionMode(e.target.value)} disabled={busy} className="rounded border border-terminal-border bg-terminal-bg px-1 py-0.5 disabled:opacity-40">
             <option value="ideal">Ideal</option>
             <option value="simple">Simple</option>
             <option value="stress">Stress</option>
           </select>
         </label>
-        <button onClick={start} className="rounded border border-kind-observed/40 px-2 py-1 text-kind-observed hover:bg-kind-observed/10">
+        <button
+          onClick={start}
+          disabled={busy}
+          className="rounded border border-kind-observed/40 px-2 py-1 text-kind-observed hover:bg-kind-observed/10 disabled:opacity-40"
+        >
           {status ? "Reset" : "Start"}
         </button>
         {status && mode === "auto" && !status.complete && (
           <>
-            <button onClick={onStep} className="rounded border border-terminal-border px-2 py-1 hover:bg-terminal-border/40">Step ▶</button>
-            <button onClick={onRunAll} className="rounded border border-terminal-border px-2 py-1 hover:bg-terminal-border/40">Run to end ⏭</button>
+            <button
+              onClick={onStep}
+              disabled={busy}
+              className="rounded border border-terminal-border px-2 py-1 hover:bg-terminal-border/40 disabled:opacity-40"
+            >
+              Step
+            </button>
+            {running ? (
+              <button
+                onClick={onStop}
+                className="rounded border border-kind-estimated/60 px-2 py-1 text-kind-estimated hover:bg-kind-estimated/10"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={onRunAll}
+                disabled={busy}
+                className="rounded border border-terminal-border px-2 py-1 hover:bg-terminal-border/40 disabled:opacity-40"
+              >
+                Run to end
+              </button>
+            )}
           </>
         )}
         {status && (
           <span className="ml-auto flex items-center gap-1.5 tabular text-terminal-muted">
+            {running && (
+              <span className="text-kind-observed">
+                Running · {status.step_index}/{status.n_periods}
+              </span>
+            )}
             {source} · {status.day} · {status.step_index}/{status.n_periods} · SoC{" "}
             <span className="text-kind-observed">{num(status.soc_mwh, 1)} MWh</span> <StatusBadge status={stage} />
           </span>
@@ -246,7 +366,7 @@ export default function TradingPage() {
             <Panel title="Current decision">
               {mode === "manual" && !status.complete ? (
                 <ManualStages
-                  stage={stage} rec={rec} instr={instr} exec={exec} done={done}
+                  stage={stage} rec={rec} instr={instr} exec={exec} done={done} busy={busy}
                   socMwh={status.soc_mwh} nextSp={status.next_settlement_period}
                   maxCharge={config.maximum_charge_mw} maxDischarge={config.maximum_discharge_mw}
                   modCharge={modCharge} setModCharge={setModCharge}
@@ -319,6 +439,7 @@ function ManualStages(props: {
   instr: DecisionRecord["trader_instruction"];
   exec: DecisionRecord["execution"];
   done: boolean;
+  busy: boolean;
   socMwh: number;
   nextSp: number | null;
   maxCharge: number;
@@ -338,14 +459,14 @@ function ManualStages(props: {
   onAdvance: () => void;
   lastDecision: DecisionRecord | null;
 }) {
-  const { stage, rec, instr, exec } = props;
-  const btn = "rounded border px-2 py-1 text-xs";
+  const { stage, rec, instr, exec, busy } = props;
+  const btn = "rounded border px-2 py-1 text-xs disabled:opacity-40";
   return (
     <div className="space-y-2 text-xs">
       {stage === "READY_FOR_RECOMMENDATION" && (
         <div className="flex items-center justify-between">
           <span className="text-terminal-muted">Next gate — SP{props.nextSp ?? "—"} · SoC {num(props.socMwh, 1)} MWh</span>
-          <button onClick={props.onRecommend} className={`${btn} border-kind-forecast/50 text-kind-forecast hover:bg-kind-forecast/10`}>Recommend</button>
+          <button onClick={props.onRecommend} disabled={busy} className={`${btn} border-kind-forecast/50 text-kind-forecast hover:bg-kind-forecast/10`}>Recommend</button>
         </div>
       )}
       {rec && (
@@ -356,8 +477,8 @@ function ManualStages(props: {
       {stage === "AWAITING_TRADER_DECISION" && (
         <div className="space-y-2 rounded border border-terminal-border p-2">
           <div className="flex gap-2">
-            <button onClick={() => props.onDecision("ACCEPT_RECOMMENDATION")} className={`${btn} border-action-charge/50 text-action-charge hover:bg-action-charge/10`}>Accept</button>
-            <button onClick={() => props.onDecision("REJECT_TO_IDLE")} className={`${btn} border-terminal-muted/50 text-terminal-muted hover:bg-terminal-border/40`}>Reject</button>
+            <button onClick={() => props.onDecision("ACCEPT_RECOMMENDATION")} disabled={busy} className={`${btn} border-action-charge/50 text-action-charge hover:bg-action-charge/10`}>Accept</button>
+            <button onClick={() => props.onDecision("REJECT_TO_IDLE")} disabled={busy} className={`${btn} border-terminal-muted/50 text-terminal-muted hover:bg-terminal-border/40`}>Reject</button>
           </div>
           <div className="flex flex-wrap items-end gap-2">
             <label className="flex flex-col gap-0.5"><span className="text-terminal-muted">Charge MW</span>
@@ -366,7 +487,7 @@ function ManualStages(props: {
             <label className="flex flex-col gap-0.5"><span className="text-terminal-muted">Discharge MW</span>
               <input type="number" value={props.modDischarge} min={0} max={props.maxDischarge} onChange={(e) => props.setModDischarge(parseFloat(e.target.value) || 0)} className="w-20 rounded border border-terminal-border bg-terminal-bg px-1 py-0.5" />
             </label>
-            <button onClick={() => props.onDecision("MODIFY")} className={`${btn} border-kind-forecast/50 text-kind-forecast hover:bg-kind-forecast/10`}>Modify</button>
+            <button onClick={() => props.onDecision("MODIFY")} disabled={busy} className={`${btn} border-kind-forecast/50 text-kind-forecast hover:bg-kind-forecast/10`}>Modify</button>
           </div>
         </div>
       )}
@@ -375,7 +496,7 @@ function ManualStages(props: {
       )}
 
       {stage === "AWAITING_EXECUTION" && (
-        <button onClick={props.onExecute} className={`${btn} border-kind-forecast/50 text-kind-forecast hover:bg-kind-forecast/10`}>Execute (simulated)</button>
+        <button onClick={props.onExecute} disabled={busy} className={`${btn} border-kind-forecast/50 text-kind-forecast hover:bg-kind-forecast/10`}>Execute (simulated)</button>
       )}
       {exec && <Row k="Executed" v={`${num(exec.executed_charge_mw, 1)}c/${num(exec.executed_discharge_mw, 1)}d MW · ${num(exec.unfilled_mwh, 1)} unfilled`} />}
 
@@ -384,14 +505,14 @@ function ManualStages(props: {
           <label className="flex flex-col gap-0.5"><span className="text-terminal-muted">Confirmed SoC (MWh)</span>
             <input value={props.confirmSoc} onChange={(e) => props.setConfirmSoc(e.target.value)} placeholder="(estimate)" className="w-24 rounded border border-terminal-border bg-terminal-bg px-1 py-0.5" />
           </label>
-          <button onClick={props.onConfirm} className={`${btn} border-action-charge/50 text-action-charge hover:bg-action-charge/10`}>Confirm</button>
+          <button onClick={props.onConfirm} disabled={busy} className={`${btn} border-action-charge/50 text-action-charge hover:bg-action-charge/10`}>Confirm</button>
         </div>
       )}
 
       {stage === "READY_FOR_NEXT_PERIOD" && props.lastDecision && (
         <>
           <CommercialSummary d={props.lastDecision} />
-          <button onClick={props.onAdvance} className={`${btn} border-kind-observed/50 text-kind-observed hover:bg-kind-observed/10`}>Next period →</button>
+          <button onClick={props.onAdvance} disabled={busy} className={`${btn} border-kind-observed/50 text-kind-observed hover:bg-kind-observed/10`}>Next period</button>
         </>
       )}
     </div>
